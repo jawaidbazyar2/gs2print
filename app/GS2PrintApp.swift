@@ -438,6 +438,10 @@ struct ContentView: View {
                     Image(decorative: image, scale: 1)
                         .resizable()
                         .interpolation(.none)
+                        // Every page has the same point size, so this frame
+                        // does not change. Image will not repaint a new
+                        // bitmap until its identity does.
+                        .id(ObjectIdentifier(image))
                         .frame(width: drawnW, height: drawnH)
                         .background(Color.white)
                         .frame(minWidth: geo.size.width, minHeight: geo.size.height)
