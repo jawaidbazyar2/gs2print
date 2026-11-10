@@ -27,7 +27,7 @@ final class JobModel: ObservableObject {
     @Published var pageIndex = 0
     @Published var pageCount = 0
     @Published var message = "Open a printer dump."
-    @Published var status = ""
+    @Published var pdfURL: URL?
     @Published var error = ""
 
     let server = PrintServer()
@@ -81,10 +81,17 @@ final class JobModel: ObservableObject {
         requestPreview()
     }
 
+    func openSavedPDF() {
+        guard let pdfURL else { return }
+        if !NSWorkspace.shared.open(pdfURL) {
+            error = "Could not open \(pdfURL.lastPathComponent)."
+        }
+    }
+
     private func open(_ url: URL) {
         finishNetworkJob()
         error = ""
-        status = ""
+        pdfURL = nil
         followTail = false
         do {
             let data = try Data(contentsOf: url)
@@ -119,8 +126,9 @@ final class JobModel: ObservableObject {
             let pdf = Self.pdfURL(for: url)
             let ok = pdf.path.withCString { gs2_job_save_pdf(created, $0) }
             if ok == 0 {
-                status = "Wrote \(pdf.lastPathComponent)"
+                pdfURL = pdf
             } else {
+                pdfURL = nil
                 error = "Could not write \(pdf.lastPathComponent)."
             }
         } catch {
@@ -145,6 +153,7 @@ final class JobModel: ObservableObject {
 
     private func beginNetworkJob() {
         previewGeneration += 1
+        pdfURL = nil
         if let old = job {
             gs2_job_free(old)
             job = nil
@@ -161,7 +170,6 @@ final class JobModel: ObservableObject {
         pageIndex = 0
         pageCount = 1
         error = ""
-        status = ""
         message = "Printing"
     }
 
@@ -190,10 +198,11 @@ final class JobModel: ObservableObject {
         }
         requestPreview()
         if saved == 0 {
-            status = "Wrote \(pdf.path)"
+            pdfURL = pdf
             error = ""
             message = pdf.lastPathComponent
         } else {
+            pdfURL = nil
             error = "Could not write \(pdf.lastPathComponent)."
         }
     }
@@ -374,10 +383,21 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
             }
-            if !model.status.isEmpty {
-                Text(model.status)
-                    .font(.caption)
-                    .textSelection(.enabled)
+            if let pdfURL = model.pdfURL {
+                HStack(spacing: 4) {
+                    Text("Wrote")
+                        .font(.caption)
+                    Button {
+                        model.openSavedPDF()
+                    } label: {
+                        Text(pdfURL.lastPathComponent)
+                            .font(.caption)
+                            .underline()
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(Color.accentColor)
+                    .pointerStyle(.link)
+                }
             }
             if !model.error.isEmpty {
                 Text(model.error)

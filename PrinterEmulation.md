@@ -110,7 +110,7 @@ The app has three jobs:
 - File → Open: read a raw printer dump and write a PDF, with no emulator running.
 - A server: listen for a raw TCP connection from anything else that can open one.
 
-The window is a small native UI on each platform: the page bitmap from the core, and a button that closes the job.
+The window is a small native UI on each platform: the page bitmap from the core, and a button that closes the job. After a PDF is written, its file name is shown at the bottom of the window. That name is a link. Clicking it asks the operating system to open the PDF (`open` on macOS, `ShellExecute` on Windows, `xdg-open` on Linux).
 
 The sidecar registers itself as the handler for `.gs2print` when the user installs or first runs it. That is a UTI in its macOS bundle, an HKCU ProgID on Windows (same idea as [ProtocolHandlers.md](ProtocolHandlers.md) for `.gs2`), and a `.desktop` MIME type on Linux. A zip or AppImage only gains the association after that registration.
 
@@ -167,7 +167,7 @@ printer imagewriter-ii
 
 ### File → Open
 
-File → Open takes a raw printer dump, the headerless byte stream a `file` capture writes (`GS2.PARLn.*` or any other file of printer bytes). The frontend feeds the whole file to the core, shows the pages, and the core writes the PDF beside the dump, with the same basename and a `.pdf` extension. A `.gs2print` saved dump (header, then bytes) opens the same way. No socket and no emulator are involved.
+File → Open takes a raw printer dump, the headerless byte stream a `file` capture writes (`GS2.PARLn.*` or any other file of printer bytes). The frontend feeds the whole file to the core, shows the pages, and the core writes the PDF beside the dump, with the same basename and a `.pdf` extension. That file name is the link at the bottom of the window. A `.gs2print` saved dump (header, then bytes) opens the same way. No socket and no emulator are involved.
 
 ### When the job ends
 
@@ -178,7 +178,7 @@ The job ends when any of these happen:
 - The user presses the sidecar's close-job button, which closes its end of the socket.
 - GS2 closes its end.
 
-The sidecar finishes the page, the core saves the libHaru document to `GS2-Print-YYYYMMDD-HHMMSS.pdf` somewhere the user can find it (Documents is the default), and the window stays open on the finished page. The next guest byte starts a new ticket and a new connection.
+The sidecar finishes the page, the core saves the libHaru document to `GS2-Print-YYYYMMDD-HHMMSS.pdf` somewhere the user can find it (Documents is the default), and the window stays open on the finished page. The saved file name is the link at the bottom of the window. The next guest byte starts a new ticket and a new connection.
 
 ### Server mode
 
