@@ -27,6 +27,8 @@ final class JobModel: ObservableObject {
     @Published var pageIndex = 0
     @Published var pageCount = 0
     @Published var message = "Open a printer dump."
+    /// True while a network job is open. The status line shows a spinner for that span.
+    @Published private(set) var printing = false
     @Published var pdfURL: URL?
     @Published var error = ""
 
@@ -171,6 +173,7 @@ final class JobModel: ObservableObject {
         pageCount = 1
         error = ""
         message = "Printing"
+        printing = true
         raiseWindow()
     }
 
@@ -217,6 +220,7 @@ final class JobModel: ObservableObject {
     private func finishNetworkJob() {
         guard networkJobOpen else { return }
         networkJobOpen = false
+        printing = false
         previewScheduled = false
         guard sawBytes, let job else { return }
         gs2_job_finish(job)
@@ -416,7 +420,7 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 12) {
             if let image = model.image {
-                Text(model.message)
+                jobStatus
                     .font(.headline)
                 pagePreview(image)
                 HStack {
@@ -436,7 +440,7 @@ struct ContentView: View {
                 }
             } else {
                 Spacer()
-                Text(model.message)
+                jobStatus
                     .foregroundStyle(.secondary)
                 Spacer()
             }
@@ -466,6 +470,19 @@ struct ContentView: View {
         }
         .padding()
         .frame(minWidth: 720, minHeight: 640)
+    }
+
+    /// "Printing" while bytes are still arriving, with the spinner lit
+    /// for that same span. A finished job is the filename alone.
+    private var jobStatus: some View {
+        HStack(spacing: 6) {
+            if model.printing {
+                Image(systemName: "progress.indicator")
+                    .symbolEffect(.variableColor.iterative, isActive: true)
+                    .accessibilityLabel("Job in progress")
+            }
+            Text(model.message)
+        }
     }
 
     /// Fit modes use the viewport on each layout. A fixed scale is the last
