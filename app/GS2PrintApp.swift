@@ -350,9 +350,21 @@ private func pageImage(_ bits: Data, width: Int, height: Int, stride: Int, scale
     )
 }
 
+private enum PreviewScale: Equatable {
+    case fitWidth
+    case fitHeight
+    case fixed(CGFloat)
+}
+
+private let previewZoomStep: CGFloat = 1.25
+private let previewMinLongSide: CGFloat = 80
+private let previewMaxLongSide: CGFloat = 4000
+
 struct ContentView: View {
     @ObservedObject var model: JobModel
     @State private var portText: String
+    @State private var scaleMode: PreviewScale = .fitHeight
+    @State private var viewport = CGSize.zero
 
     init(model: JobModel) {
         self.model = model
@@ -364,11 +376,7 @@ struct ContentView: View {
             if let image = model.image {
                 Text(model.message)
                     .font(.headline)
-                Image(decorative: image, scale: 1)
-                    .resizable()
-                    .scaledToFit()
-                    .background(Color.white)
-                    .padding(.horizontal)
+                pagePreview(image)
                 HStack {
                     Button("Previous") { model.step(-1) }
                         .disabled(model.pageIndex == 0)
@@ -376,6 +384,13 @@ struct ContentView: View {
                         .frame(minWidth: 140)
                     Button("Next") { model.step(1) }
                         .disabled(model.pageIndex + 1 >= model.pageCount)
+                    Spacer(minLength: 12)
+                    Button("−") { zoom(1 / previewZoomStep, image: image) }
+                        .disabled(!canZoom(1 / previewZoomStep, image: image))
+                    Button("+") { zoom(previewZoomStep, image: image) }
+                        .disabled(!canZoom(previewZoomStep, image: image))
+                    Button("Fit Width") { scaleMode = .fitWidth }
+                    Button("Fit Height") { scaleMode = .fitHeight }
                 }
             } else {
                 Spacer()
@@ -409,6 +424,71 @@ struct ContentView: View {
         }
         .padding()
         .frame(minWidth: 720, minHeight: 640)
+    }
+
+    /// Fit modes use the viewport on each layout. A fixed scale is the last
+    /// size the user chose with + or −, so resizing the window leaves it.
+    private func pagePreview(_ image: CGImage) -> some View {
+        GeometryReader { geo in
+            let scale = resolvedScale(image: image, viewport: geo.size)
+            ScrollView([.horizontal, .vertical]) {
+                if let scale {
+                    let drawnW = CGFloat(image.width) * scale
+                    let drawnH = CGFloat(image.height) * scale
+                    Image(decorative: image, scale: 1)
+                        .resizable()
+                        .interpolation(.none)
+                        .frame(width: drawnW, height: drawnH)
+                        .background(Color.white)
+                        .frame(minWidth: geo.size.width, minHeight: geo.size.height)
+                }
+            }
+            // A new page recreates the scroll view so it starts at the top.
+            // Zoom keeps this identity, so the offset stays.
+            .id(model.pageIndex)
+        }
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { viewport = $0 }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func resolvedScale(image: CGImage, viewport: CGSize) -> CGFloat? {
+        let width = CGFloat(image.width)
+        let height = CGFloat(image.height)
+        guard width > 0, height > 0 else { return nil }
+        switch scaleMode {
+        case .fitWidth:
+            guard viewport.width > 1 else { return nil }
+            return viewport.width / width
+        case .fitHeight:
+            guard viewport.height > 1 else { return nil }
+            return viewport.height / height
+        case .fixed(let scale):
+            return clampedScale(scale, image: image)
+        }
+    }
+
+    private func zoom(_ factor: CGFloat, image: CGImage) {
+        guard let current = resolvedScale(image: image, viewport: viewport) else { return }
+        scaleMode = .fixed(clampedScale(current * factor, image: image))
+    }
+
+    private func canZoom(_ factor: CGFloat, image: CGImage) -> Bool {
+        guard let current = resolvedScale(image: image, viewport: viewport) else { return false }
+        let next = clampedScale(current * factor, image: image)
+        if factor > 1 { return next > current * 1.001 }
+        return next < current / 1.001
+    }
+
+    private func clampedScale(_ scale: CGFloat, image: CGImage) -> CGFloat {
+        let limits = scaleLimits(image)
+        return min(max(scale, limits.min), limits.max)
+    }
+
+    /// Fixed zoom keeps the page's long side between these point sizes.
+    private func scaleLimits(_ image: CGImage) -> (min: CGFloat, max: CGFloat) {
+        let longSide = CGFloat(max(image.width, image.height))
+        guard longSide > 0 else { return (1, 1) }
+        return (previewMinLongSide / longSide, previewMaxLongSide / longSide)
     }
 
     private var serverBar: some View {
