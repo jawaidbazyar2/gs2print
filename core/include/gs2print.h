@@ -23,8 +23,9 @@ void gs2_job_finish(gs2_job *job);
 
 int gs2_job_page_count(gs2_job *job);
 
-/* Packed 1-bit, top-down, bit 7 is the leftmost pixel. NULL if page
- * is out of range. The pointer is valid until the next mutating call.
+/* Packed 1-bit, top-down, bit 7 is the leftmost pixel, 720 dpi.
+ * NULL if page is out of range. The pointer is valid until the next
+ * gs2_job_page_bits, gs2_job_write, or gs2_job_finish.
  */
 const uint8_t *gs2_job_page_bits(gs2_job *job, int page,
                                  int *width, int *height, int *stride);

@@ -171,6 +171,45 @@ final class JobModel: ObservableObject {
         pageCount = 1
         error = ""
         message = "Printing"
+        raiseWindow()
+    }
+
+    /// The app is often already running, behind whatever is printing.
+    /// The first bytes of a job bring its window forward. Later bytes
+    /// on that same job do not, because this runs only when a job opens.
+    private func raiseWindow() {
+        if NSApp.isHidden {
+            NSApp.unhide(nil)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        present(allowOpen: true)
+        // deminiaturize is ignored until the app is active, and activation
+        // does not finish in this turn.
+        DispatchQueue.main.async { [weak self] in
+            self?.present(allowOpen: false)
+        }
+    }
+
+    /// A miniaturized window reports `canBecomeMain` as false, so the
+    /// filter keeps it. With no window left, the Dock's untitled-file
+    /// path is what opens this scene again.
+    private func present(allowOpen: Bool) {
+        var windows = NSApp.windows.filter { $0.canBecomeMain || $0.isMiniaturized }
+        if windows.isEmpty, allowOpen {
+            _ = NSApp.delegate?.applicationOpenUntitledFile?(NSApp)
+            windows = NSApp.windows.filter { $0.canBecomeMain || $0.isMiniaturized }
+        }
+        show(windows)
+    }
+
+    private func show(_ windows: [NSWindow]) {
+        for window in windows {
+            if window.isMiniaturized {
+                window.deminiaturize(nil)
+            }
+            window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
+        }
     }
 
     /// Idle and socket close both end the job. A second call is a no-op, and
@@ -237,9 +276,9 @@ final class JobModel: ObservableObject {
         requestPreview()
     }
 
-    /// The page bitmap is large enough that drawing it inline stalls the
-    /// socket. One scan runs at a time, off the main thread; a newer copy
-    /// replaces it when that scan finishes.
+    /// Copying the page bitmap on the main thread keeps the pointer valid.
+    /// Expanding it to the preview image runs off the main thread, one scan
+    /// at a time, so a live job does not stall the socket.
     private func requestPreview() {
         previewDirty = true
         pumpPreview()
@@ -251,9 +290,7 @@ final class JobModel: ObservableObject {
         var height: Int32 = 0
         var stride: Int32 = 0
         guard let bits = gs2_job_page_bits(job, Int32(pageIndex), &width, &height, &stride) else { return }
-        let scale = 8
-        guard width > 0, height > 0, stride > 0,
-              Int(width) % scale == 0, Int(height) % scale == 0 else { return }
+        guard width > 0, height > 0, stride > 0 else { return }
         let copied = Data(bytes: bits, count: Int(height) * Int(stride))
         let w = Int(width)
         let h = Int(height)
@@ -262,7 +299,7 @@ final class JobModel: ObservableObject {
         previewDirty = false
         previewInFlight = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let image = pageImage(copied, width: w, height: h, stride: s, scale: scale)
+            let image = pageImage(copied, width: w, height: h, stride: s)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.previewInFlight = false
@@ -309,26 +346,30 @@ final class JobModel: ObservableObject {
 
 }
 
-private func pageImage(_ bits: Data, width: Int, height: Int, stride: Int, scale: Int) -> CGImage? {
-    let pw = width / scale
-    let ph = height / scale
-    guard pw > 0, ph > 0, bits.count >= height * stride else { return nil }
-    var pixels = [UInt8](repeating: 255, count: pw * ph)
+/// Full 720 dpi page, one gray byte per printer pixel. The view scales this
+/// to the window. A baked 8× reduction was 90 dpi, and nearest-neighbor
+/// then drew those pixels as blocks on a retina display.
+private func pageImage(_ bits: Data, width: Int, height: Int, stride: Int) -> CGImage? {
+    guard width > 0, height > 0, bits.count >= height * stride else { return nil }
+    var pixels = [UInt8](repeating: 255, count: width * height)
     bits.withUnsafeBytes { raw in
         guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
         pixels.withUnsafeMutableBytes { dst in
             guard let out = dst.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-            for y in 0..<ph {
-                let y0 = y * scale
-                for x in 0..<pw {
-                    var on = false
-                    for dy in 0..<scale {
-                        if base[(y0 + dy) * stride + x] != 0 {
-                            on = true
-                            break
-                        }
+            for y in 0..<height {
+                let row = base + y * stride
+                let dest = out + y * width
+                let bytes = min(stride, (width + 7) / 8)
+                for byte in 0..<bytes {
+                    let value = row[byte]
+                    if value == 0 { continue }
+                    let x0 = byte * 8
+                    let n = min(8, width - x0)
+                    var mask: UInt8 = 0x80
+                    for bit in 0..<n {
+                        if value & mask != 0 { dest[x0 + bit] = 0 }
+                        mask >>= 1
                     }
-                    if on { out[y * pw + x] = 0 }
                 }
             }
         }
@@ -336,16 +377,16 @@ private func pageImage(_ bits: Data, width: Int, height: Int, stride: Int, scale
     let data = Data(pixels) as CFData
     guard let provider = CGDataProvider(data: data) else { return nil }
     return CGImage(
-        width: pw,
-        height: ph,
+        width: width,
+        height: height,
         bitsPerComponent: 8,
         bitsPerPixel: 8,
-        bytesPerRow: pw,
+        bytesPerRow: width,
         space: CGColorSpaceCreateDeviceGray(),
         bitmapInfo: CGBitmapInfo(rawValue: 0),
         provider: provider,
         decode: nil,
-        shouldInterpolate: false,
+        shouldInterpolate: true,
         intent: .defaultIntent
     )
 }
@@ -362,6 +403,7 @@ private let previewMaxLongSide: CGFloat = 4000
 
 struct ContentView: View {
     @ObservedObject var model: JobModel
+    @Environment(\.displayScale) private var displayScale
     @State private var portText: String
     @State private var scaleMode: PreviewScale = .fitHeight
     @State private var viewport = CGSize.zero
@@ -437,7 +479,7 @@ struct ContentView: View {
                     let drawnH = CGFloat(image.height) * scale
                     Image(decorative: image, scale: 1)
                         .resizable()
-                        .interpolation(.none)
+                        .interpolation(scale * displayScale >= 1 ? .none : .high)
                         // Every page has the same point size, so this frame
                         // does not change. Image will not repaint a new
                         // bitmap until its identity does.

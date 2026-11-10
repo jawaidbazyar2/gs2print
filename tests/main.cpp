@@ -72,10 +72,10 @@ void testTextAndCrLf() {
     // The head starts at the top of the form. Draft A's apex is wire 1.
     expect(gs2_job_page_count(job) == 1, "text page count");
     expect(box.any && box.minY == 0, "draft A sits on the first baseline");
-    expect(box.minX == 360, "printable area is centered on the page");
-    // CR+LF feeds 1/6 inch (240 dots) once, so B's top wire is at y=240.
-    expect(inkAt(job, 0, box.minX, 240), "CR+LF feeds once");
-    expect(box.maxY < 450, "CR+LF does not feed a second line");
+    expect(box.minX == 180, "printable area is centered on the page");
+    // CR+LF feeds 1/6 inch once. At 720 dpi that is 120 pixels, where B starts.
+    expect(inkAt(job, 0, box.minX, 120), "CR+LF feeds once");
+    expect(box.maxY < 225, "CR+LF does not feed a second line");
     gs2_job_free(job);
 }
 
@@ -84,8 +84,8 @@ void testEscT() {
     writeStr(job, "\x1bT16\nA");
     gs2_job_finish(job);
     Box box = bounds(job, 0);
-    // 16/144 inch = 160 dots. A's apex is the top wire, so the ink starts there.
-    expect(box.any && box.minY == 160, "ESC T 16 feeds 16/144 inch");
+    // 16/144 inch is 80 pixels at 720 dpi. A's apex is the top wire.
+    expect(box.any && box.minY == 80, "ESC T 16 feeds 16/144 inch");
     gs2_job_free(job);
 }
 
@@ -96,11 +96,11 @@ void testGraphics() {
     gs2_job_write(job, cols, 8);
     gs2_job_finish(job);
     Box box = bounds(job, 0);
-    // Pica graphics is 80 dpi: 1440/80 = 18 dots per column, 8 columns.
+    // Pica graphics is 80 dpi: 18 grid units per column, stored as 9 pixels.
     expect(box.any, "graphics leaves ink");
     expect(box.minY == 0, "graphics bit 0 is the top wire");
-    expect(box.maxX - box.minX + 1 == 8 * 18, "graphics uses the pitch density, not text cells");
-    expect(box.maxY - box.minY + 1 == 8 * 20, "graphics uses eight pins at 1/72 inch");
+    expect(box.maxX - box.minX + 1 == 8 * 9, "graphics uses the pitch density, not text cells");
+    expect(box.maxY - box.minY + 1 == 8 * 10, "graphics uses eight pins at 1/72 inch");
     gs2_job_free(job);
 }
 
@@ -109,15 +109,19 @@ void testReverse() {
     writeStr(job, "\n\nA\x1br\nB");
     gs2_job_finish(job);
     Box box = bounds(job, 0);
-    // Two forward feeds put A at y=480 (ink at 540). Reverse LF then B at y=240.
-    expect(box.any && box.minY == 240, "reverse feed draws above the previous line");
-    expect(inkAt(job, 0, 360, 540), "the earlier line stays on the page");
+    // Two forward feeds put A at 240 pixels (ink at 270). Reverse LF then B at 120.
+    expect(box.any && box.minY == 120, "reverse feed draws above the previous line");
+    expect(inkAt(job, 0, 180, 270), "the earlier line stays on the page");
     gs2_job_free(job);
 }
 
 void testFormFeedAndPdf() {
     gs2_job *job = gs2_job_new();
     writeStr(job, "A\fB");
+    expect(gs2_job_page_count(job) == 2, "form feed keeps the open page");
+    expect(bounds(job, 0).any, "committed page keeps its ink");
+    expect(bounds(job, 1).any, "open page keeps its ink");
+    expect(bounds(job, 0).any, "committed page reads back again");
     gs2_job_finish(job);
     expect(gs2_job_page_count(job) == 2, "form feed yields two pages");
     expect(bounds(job, 0).any && bounds(job, 1).any, "each page has ink");
@@ -138,8 +142,9 @@ void testFormFeedAndPdf() {
         while ((n = std::fread(buf, 1, sizeof buf, whole)) > 0) body.append(buf, n);
         std::fclose(whole);
     }
-    expect(body.find("/CCITTFaxDecode") != std::string::npos && body.find("/BlackIs1 false") != std::string::npos,
-           "pdf image is a 1-bit CCITT picture with black as 0");
+    expect(body.find("/FlateDecode") != std::string::npos && body.find("/Predictor 12") != std::string::npos
+               && body.find("/CCITTFaxDecode") == std::string::npos,
+           "pdf image is a 1-bit Flate picture with predictor 12");
     gs2_job_free(job);
 }
 
@@ -158,7 +163,7 @@ void testHeader() {
     gs2_job_write(job, bytes + off, n - off);
     gs2_job_finish(job);
     Box box = bounds(job, 0);
-    expect(box.any && box.minY == 0 && box.maxY < 200, "header payload prints as one character");
+    expect(box.any && box.minY == 0 && box.maxY < 100, "header payload prints as one character");
     gs2_job_free(job);
 }
 
@@ -170,7 +175,7 @@ void testSplitCommands() {
     writeStr(job, "6\nA");
     gs2_job_finish(job);
     Box box = bounds(job, 0);
-    expect(box.any && box.minY == 160, "the rest of ESC T 16 applies on the next write");
+    expect(box.any && box.minY == 80, "the rest of ESC T 16 applies on the next write");
     gs2_job_free(job);
 
     gs2_job *gfx = gs2_job_new();
@@ -181,14 +186,14 @@ void testSplitCommands() {
     gs2_job_write(gfx, cols, 2);
     gs2_job_finish(gfx);
     Box gbox = bounds(gfx, 0);
-    expect(gbox.any && gbox.maxX - gbox.minX + 1 == 2 * 18, "split ESC G prints the columns it was given");
+    expect(gbox.any && gbox.maxX - gbox.minX + 1 == 2 * 9, "split ESC G prints the columns it was given");
     gs2_job_free(gfx);
 
     gs2_job *drop = gs2_job_new();
     writeStr(drop, "A\x1bT1");
     gs2_job_finish(drop);
     Box dbox = bounds(drop, 0);
-    expect(gs2_job_page_count(drop) == 1 && dbox.any && dbox.minY == 0 && dbox.maxY < 240,
+    expect(gs2_job_page_count(drop) == 1 && dbox.any && dbox.minY == 0 && dbox.maxY < 120,
            "finish abandons a partial command and still commits the page");
     gs2_job_free(drop);
 }

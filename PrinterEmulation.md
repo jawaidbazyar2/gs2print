@@ -76,11 +76,11 @@ Write it in C++. The printer is a stateful object: head position, switch banks, 
 
 Export a small C API for the frontends. Swift and AppKit on macOS, a Win32 window on Windows, and GTK on Linux can all call C. They should not depend on the C++ ABI. The C functions are: feed bytes, read the current page bitmap (pointer, width, height, stride), and finish the job.
 
-The bitmap is one page, at the printer's dot pitch. A form feed, or the end of the job, commits that page and starts a fresh one. The frontend redraws from the current bitmap as bytes arrive, so the preview is the page in progress.
+The head is placed at 1440 dpi. That grid divides the wire pitch (1/72 inch), the paper step (1/144 inch), and the graphics densities 72, 80, 96, 120, 144, and 160. The stored page is 720 dpi, one black 1-bit layer: each dot rectangle is rounded onto that grid when it is drawn, two grid units per pixel. The page under the head is uncompressed, so dots can be painted as bytes arrive. A form feed, or the end of the job, commits that page. The core deflates it with a PNG Up row predictor and starts a fresh uncompressed page. Reading a committed page inflates it. The frontend redraws from the bitmap as bytes arrive, so the preview is the page in progress.
 
 ### PDF
 
-libHaru writes the PDF. As each page is committed, the core adds it to the open libHaru document as one image page (`HPDF_LoadRawImageFromMem` of that bitmap). libHaru holds the document in memory and writes the file on save, so the PDF is written when the job ends, at `GS2-Print-YYYYMMDD-HHMMSS.pdf`. Pages are not deferred until the whole job has been parsed. The on-screen preview stays the bitmap; the frontend does not re-read the PDF to draw it.
+libHaru writes the PDF when the job ends, at `GS2-Print-YYYYMMDD-HHMMSS.pdf`. Each page is one 1-bit image of the 720 dpi bitmap, Flate-compressed with PNG predictor 12, the same Up filter as a committed page. The image is drawn at 8.5 by 11 inches. There is no embedded font. Colour stays out; the page is a single black layer. The on-screen preview stays the bitmap; the frontend does not re-read the PDF to draw it.
 
 ## Connection
 
@@ -111,6 +111,8 @@ The app has three jobs:
 - A server: listen for a raw TCP connection from anything else that can open one.
 
 The window is a small native UI on each platform: the page bitmap from the core, and a button that closes the job. After a PDF is written, its file name is shown at the bottom of the window. That name is a link. Clicking it asks the operating system to open the PDF (`open` on macOS, `ShellExecute` on Windows, `xdg-open` on Linux).
+
+The preview shows one page at a time. Its scale buttons are +, −, fit width, and fit height. + draws the page larger and − draws it smaller. Fit width scales the page so its width matches the view; fit height scales it so its height matches the view. While either fit is selected, resizing the window changes the scale to keep that fit. + or − leaves fit and holds the scale the user picked. The view of each page scrolls horizontally and vertically, so the user can move to any part of a page drawn larger than the window. Scaling and scrolling are display only. The bitmap and the PDF stay at 720 dpi.
 
 The sidecar registers itself as the handler for `.gs2print` when the user installs or first runs it. That is a UTI in its macOS bundle, an HKCU ProgID on Windows (same idea as [ProtocolHandlers.md](ProtocolHandlers.md) for `.gs2`), and a `.desktop` MIME type on Linux. A zip or AppImage only gains the association after that registration.
 
