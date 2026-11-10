@@ -70,6 +70,7 @@
 		7BE0D91AF14C4A7F053AA017 /* hpdf_utils.c in Sources */ = {isa = PBXBuildFile; fileRef = 303354F0D02892AA1D70C488 /* hpdf_utils.c */; settings = {COMPILER_FLAGS = "-w"; }; };
 		04A6776A74994F63F601470A /* hpdf_xref.c in Sources */ = {isa = PBXBuildFile; fileRef = 49490BB8AE53BD4686141DF1 /* hpdf_xref.c */; settings = {COMPILER_FLAGS = "-w"; }; };
 		2F01931F181E9418BB52BCA9 /* GS2PrintApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 010EA2105D8807090226FBBA /* GS2PrintApp.swift */; };
+		C3A91E7B04D25F68A1B0C4E2 /* PrintServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4B02F8C15E36079B2C1D5F3 /* PrintServer.swift */; };
 		22597EF05835B3CBE2FFAA6E /* main.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 04C632C913A8962AF0471AFD /* main.cpp */; };
 		A80A251DFA0EDA91EE9321F5 /* libgs2print_core.a in Frameworks */ = {isa = PBXBuildFile; fileRef = AACC75FCC42674A9CCAA6349 /* libgs2print_core.a */; };
 		237E33D6A16BEB1E5CAB4D09 /* libgs2print_core.a in Frameworks */ = {isa = PBXBuildFile; fileRef = AACC75FCC42674A9CCAA6349 /* libgs2print_core.a */; };
@@ -144,6 +145,7 @@
 		303354F0D02892AA1D70C488 /* hpdf_utils.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = hpdf_utils.c; path = "third_party/libharu/src/hpdf_utils.c"; sourceTree = SOURCE_ROOT; };
 		49490BB8AE53BD4686141DF1 /* hpdf_xref.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = hpdf_xref.c; path = "third_party/libharu/src/hpdf_xref.c"; sourceTree = SOURCE_ROOT; };
 		010EA2105D8807090226FBBA /* GS2PrintApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = GS2PrintApp.swift; path = "app/GS2PrintApp.swift"; sourceTree = SOURCE_ROOT; };
+		D4B02F8C15E36079B2C1D5F3 /* PrintServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = PrintServer.swift; path = "app/PrintServer.swift"; sourceTree = SOURCE_ROOT; };
 		535033033B7F7930338493E3 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; name = Info.plist; path = "app/Info.plist"; sourceTree = SOURCE_ROOT; };
 		45B0AC6853196ED51F1472A2 /* gs2print-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = gs2print-Bridging-Header.h; path = "app/gs2print-Bridging-Header.h"; sourceTree = SOURCE_ROOT; };
 		04C632C913A8962AF0471AFD /* main.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = main.cpp; path = "tests/main.cpp"; sourceTree = SOURCE_ROOT; };
@@ -163,6 +165,7 @@
 			isa = PBXGroup;
 			children = (
 				010EA2105D8807090226FBBA /* GS2PrintApp.swift */,
+				D4B02F8C15E36079B2C1D5F3 /* PrintServer.swift */,
 				535033033B7F7930338493E3 /* Info.plist */,
 				45B0AC6853196ED51F1472A2 /* gs2print-Bridging-Header.h */,
 			);
@@ -447,6 +450,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				2F01931F181E9418BB52BCA9 /* GS2PrintApp.swift in Sources */,
+				C3A91E7B04D25F68A1B0C4E2 /* PrintServer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
