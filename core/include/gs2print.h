@@ -1,0 +1,44 @@
+#ifndef GS2PRINT_H
+#define GS2PRINT_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct gs2_job gs2_job;
+
+gs2_job *gs2_job_new(void);
+void gs2_job_free(gs2_job *job);
+
+/* Consume this buffer and return. A command split across calls stays
+ * in the decoder until a later write completes it. len may be 0.
+ */
+void gs2_job_write(gs2_job *job, const uint8_t *bytes, size_t len);
+
+/* Commit the trailing page. An unfinished command is dropped. */
+void gs2_job_finish(gs2_job *job);
+
+int gs2_job_page_count(gs2_job *job);
+
+/* Packed 1-bit, top-down, bit 7 is the leftmost pixel. NULL if page
+ * is out of range. The pointer is valid until the next mutating call.
+ */
+const uint8_t *gs2_job_page_bits(gs2_job *job, int page,
+                                 int *width, int *height, int *stride);
+
+/* 0 on success, -1 on failure. */
+int gs2_job_save_pdf(gs2_job *job, const char *path);
+
+/* Offset of the printer bytes in a GS2PRINT 1 saved dump.
+ * Returns 0 when the buffer is a raw dump.
+ */
+size_t gs2_dump_payload_offset(const uint8_t *bytes, size_t len);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

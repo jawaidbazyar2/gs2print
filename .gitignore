@@ -1,0 +1,51 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+*.xcscmblueprint
+xcuserdata/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM
+*.dSYM.zip
+
+# CMake / compiled output
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CMakeUserPresets.json
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+build-*/
+out/
+*.o
+*.obj
+*.lo
+*.la
+*.a
+*.dylib
+*.so
+
+# Swift Package Manager
+.build/
+.swiftpm/
+*.swiftmodule
+*.swiftdoc
+*.swiftsourceinfo
+
+# Printer captures and rendered jobs
+GS2.SSC*
+GS2.PARL*
+GS2-Print-*.pdf
+
+# Secrets
+.env
+.env.*
+*.pem
