@@ -115,7 +115,8 @@ private:
     bool doubleWidth_ = false;
     Script script_ = Script::None;
     bool mouseText_ = false;
-    bool autoLF_ = true;
+    // Factory SW1-8 is open: a CR returns the head and does not feed.
+    bool autoLF_ = false;
     bool crBeforeLF_ = true;
     bool includeEighth_ = false;
     bool slashedZero_ = false;
@@ -130,7 +131,9 @@ private:
     // ultracondensed, proportional pica, proportional elite.
     int pitch_ = 1;
 
-    uint8_t swA_ = 0xD0;
+    // Group A image of DIP SW1. Bit 7 is A-8 / SW1-8. $50 leaves that bit
+    // open and keeps A-7 and A-5 closed.
+    uint8_t swA_ = 0x50;
     uint8_t swB_ = 0x20;
 
     uint8_t paramCmd_ = 0;
