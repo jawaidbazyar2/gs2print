@@ -112,6 +112,8 @@ The app has three jobs:
 
 The window is a small native UI on each platform: the page bitmap from the core, and a button that closes the job. After a PDF is written, its file name is shown at the bottom of the window. That name is a link. Clicking it asks the operating system to open the PDF (`open` on macOS, `ShellExecute` on Windows, `xdg-open` on Linux).
 
+Settings… opens a window with one section per printer. ImageWriter’s first switch is SW1-8, line feed after carriage return. It ships open, so a carriage return returns the head and does not feed. The saved position is the power-on DIP for the next job. A job already printing keeps the position it started with. The guest can still close or open that switch with `ESC D` / `ESC Z`.
+
 The preview shows one page at a time. Its scale buttons are +, −, fit width, and fit height. + draws the page larger and − draws it smaller. Fit width scales the page so its width matches the view; fit height scales it so its height matches the view. While either fit is selected, resizing the window changes the scale to keep that fit. + or − leaves fit and holds the scale the user picked. The view of each page scrolls horizontally and vertically, so the user can move to any part of a page drawn larger than the window. Scaling and scrolling are display only. The bitmap and the PDF stay at 720 dpi.
 
 The sidecar registers itself as the handler for `.gs2print` when the user installs or first runs it. That is a UTI in its macOS bundle, an HKCU ProgID on Windows (same idea as [ProtocolHandlers.md](ProtocolHandlers.md) for `.gs2`), and a `.desktop` MIME type on Linux. A zip or AppImage only gains the association after that registration.

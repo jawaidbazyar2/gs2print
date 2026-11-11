@@ -100,6 +100,17 @@ void testCrOverstrike() {
     gs2_job_free(fed);
 }
 
+void testSetAutoLf() {
+    gs2_job *job = gs2_job_new();
+    gs2_job_set_auto_lf(job, 1);
+    writeStr(job, "A\rB");
+    gs2_job_finish(job);
+    Box box = bounds(job, 0);
+    // Same spacing as CR+LF: 1/6 inch is 120 pixels at 720 dpi.
+    expect(box.any && inkAt(job, 0, box.minX, 120), "power-on auto line feed makes CR feed one line");
+    gs2_job_free(job);
+}
+
 void testEscT() {
     gs2_job *job = gs2_job_new();
     writeStr(job, "\x1bT16\nA");
@@ -248,6 +259,7 @@ void testSplitCommands() {
 int main() {
     testTextAndCrLf();
     testCrOverstrike();
+    testSetAutoLf();
     testEscT();
     testGraphics();
     testReverse();

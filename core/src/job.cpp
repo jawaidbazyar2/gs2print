@@ -48,6 +48,11 @@ gs2_job *gs2_job_new(void) { return new gs2_job(); }
 
 void gs2_job_free(gs2_job *job) { delete job; }
 
+void gs2_job_set_auto_lf(gs2_job *job, int on) {
+    if (!job) return;
+    job->iw.setAutoLineFeed(on != 0);
+}
+
 void gs2_job_write(gs2_job *job, const uint8_t *bytes, size_t len) {
     if (!job) return;
     job->countOpen = true;

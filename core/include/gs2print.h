@@ -13,6 +13,12 @@ typedef struct gs2_job gs2_job;
 gs2_job *gs2_job_new(void);
 void gs2_job_free(gs2_job *job);
 
+/* Power-on SW1-8. 0: a CR returns the head. 1: a CR also feeds one line.
+ * Call after gs2_job_new and before the first write. ESC D / ESC Z still
+ * override it for the rest of the job.
+ */
+void gs2_job_set_auto_lf(gs2_job *job, int on);
+
 /* Consume this buffer and return. A command split across calls stays
  * in the decoder until a later write completes it. len may be 0.
  */

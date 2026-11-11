@@ -27,6 +27,8 @@ public:
     // Drop a half-received command and strike any buffered line.
     void finish();
     void sync();
+    // Power-on SW1-8. Closed adds a line feed after CR.
+    void setAutoLineFeed(bool on);
 
     int lineHeight() const { return lineHeight_; }
     bool pendingFeed() const { return pendingCR_; }

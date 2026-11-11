@@ -62,6 +62,12 @@ void ImageWriter::finish() {
 
 void ImageWriter::sync() { flushLine(); }
 
+void ImageWriter::setAutoLineFeed(bool on) {
+    if (on) swA_ = static_cast<uint8_t>(swA_ | 0x80);
+    else swA_ = static_cast<uint8_t>(swA_ & ~0x80);
+    applySwitches();
+}
+
 void ImageWriter::byteIn(uint8_t raw) {
     uint8_t ch = includeEighth_ ? raw : static_cast<uint8_t>(raw & 0x7F);
     if (deselected_) {

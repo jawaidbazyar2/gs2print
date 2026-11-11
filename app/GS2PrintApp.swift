@@ -20,6 +20,10 @@ struct GS2PrintApp: App {
         .restorationBehavior(.disabled)
         .defaultLaunchBehavior(.suppressed)
         .commands { openCommands }
+
+        Settings {
+            SettingsView()
+        }
     }
 
     @CommandsBuilder
@@ -345,6 +349,7 @@ final class JobModel: ObservableObject {
                 error = "Could not start a print job."
                 return
             }
+            gs2_job_set_auto_lf(created, PrinterSettings.autoLineFeed ? 1 : 0)
             payload.withUnsafeBytes { raw in
                 if let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self), raw.count > 0 {
                     gs2_job_write(created, base, raw.count)
@@ -533,6 +538,7 @@ final class JobModel: ObservableObject {
             networkJobOpen = false
             return
         }
+        gs2_job_set_auto_lf(created, PrinterSettings.autoLineFeed ? 1 : 0)
         job = created
         networkJobOpen = true
         sawBytes = false
@@ -687,6 +693,29 @@ private func pageImage(_ bits: Data, width: Int, height: Int, stride: Int) -> CG
         shouldInterpolate: true,
         intent: .defaultIntent
     )
+}
+
+private enum PrinterSettings {
+    static let autoLineFeedKey = "imagewriter.autoLineFeed"
+
+    static var autoLineFeed: Bool {
+        UserDefaults.standard.bool(forKey: autoLineFeedKey)
+    }
+}
+
+private struct SettingsView: View {
+    @AppStorage(PrinterSettings.autoLineFeedKey) private var autoLineFeed = false
+
+    var body: some View {
+        Form {
+            Section("ImageWriter") {
+                Toggle("SW1-8  Line feed after carriage return", isOn: $autoLineFeed)
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 420)
+        .padding()
+    }
 }
 
 private enum PreviewScale: Equatable {
