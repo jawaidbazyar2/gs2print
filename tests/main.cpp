@@ -79,6 +79,27 @@ void testTextAndCrLf() {
     gs2_job_free(job);
 }
 
+void testCrOverstrike() {
+    gs2_job *job = gs2_job_new();
+    writeStr(job, "A\rB");
+    gs2_job_finish(job);
+    Box box = bounds(job, 0);
+    // Factory SW1-8 is open, so CR returns the head and the next glyph
+    // reprints the same line.
+    expect(box.any && box.minY == 0, "CR leaves the line at the top");
+    expect(box.maxY < 110, "CR does not feed");
+    expect(box.maxX - box.minX + 1 < 80, "CR returns the head before the next glyph");
+    gs2_job_free(job);
+
+    gs2_job *fed = gs2_job_new();
+    const uint8_t on[] = {0x1B, 'D', 0x80, 0x00, 'A', '\r', 'B'};
+    gs2_job_write(fed, on, sizeof on);
+    gs2_job_finish(fed);
+    Box fbox = bounds(fed, 0);
+    expect(fbox.any && inkAt(fed, 0, fbox.minX, 120), "closing A-8 makes CR feed one line");
+    gs2_job_free(fed);
+}
+
 void testEscT() {
     gs2_job *job = gs2_job_new();
     writeStr(job, "\x1bT16\nA");
@@ -158,6 +179,30 @@ void testHeader() {
     size_t rawOff = gs2_dump_payload_offset(reinterpret_cast<const uint8_t *>(raw), std::strlen(raw));
     expect(rawOff == 0, "raw file is not stripped");
 
+    const char *live = "GS2PRINT 1\nprinter imagewriter-ii\nsocket /tmp/gs2-print-12345-1.sock\n\n";
+    auto *liveBytes = reinterpret_cast<const uint8_t *>(live);
+    size_t liveLen = std::strlen(live);
+    char field[64];
+    expect(gs2_dump_payload_offset(liveBytes, liveLen) == liveLen, "live ticket ends at the blank line");
+    expect(gs2_ticket_field(liveBytes, liveLen, "socket", field, sizeof field) == 1
+               && std::strcmp(field, "/tmp/gs2-print-12345-1.sock") == 0,
+           "socket field");
+    expect(gs2_ticket_field(liveBytes, liveLen, "printer", field, sizeof field) == 1
+               && std::strcmp(field, "imagewriter-ii") == 0,
+           "printer field");
+    expect(gs2_ticket_field(liveBytes, liveLen, "missing", field, sizeof field) == 0, "absent field");
+    expect(gs2_ticket_field(liveBytes, liveLen, "socket", field, 4) == -1, "short buffer does not copy");
+
+    auto *savedBytes = reinterpret_cast<const uint8_t *>(saved);
+    expect(gs2_ticket_field(savedBytes, n, "socket", field, sizeof field) == 0, "saved dump has no socket");
+    expect(gs2_ticket_field(reinterpret_cast<const uint8_t *>(raw), std::strlen(raw), "socket", field, sizeof field) == 0,
+           "raw file is not a header");
+
+    const char *crlf = "GS2PRINT 1\r\nprinter imagewriter-ii\r\nsocket /tmp/gs2.sock\r\n\r\n";
+    expect(gs2_ticket_field(reinterpret_cast<const uint8_t *>(crlf), std::strlen(crlf), "socket", field, sizeof field) == 1
+               && std::strcmp(field, "/tmp/gs2.sock") == 0,
+           "CRLF ticket socket");
+
     gs2_job *job = gs2_job_new();
     auto *bytes = reinterpret_cast<const uint8_t *>(saved);
     gs2_job_write(job, bytes + off, n - off);
@@ -202,6 +247,7 @@ void testSplitCommands() {
 
 int main() {
     testTextAndCrLf();
+    testCrOverstrike();
     testEscT();
     testGraphics();
     testReverse();

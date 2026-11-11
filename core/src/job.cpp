@@ -169,26 +169,97 @@ int gs2_job_save_pdf(gs2_job *job, const char *path) {
     return saved == HPDF_OK ? 0 : -1;
 }
 
-size_t gs2_dump_payload_offset(const uint8_t *bytes, size_t len) {
+namespace {
+
+struct HeaderScan {
+    size_t payload = 0;
+    int field = 0;
+};
+
+bool headerMagic(const uint8_t *bytes, size_t len, size_t *index) {
     static const char magic[] = "GS2PRINT 1";
     const size_t mlen = sizeof(magic) - 1;
-    if (!bytes || len < mlen + 1) return 0;
-    if (std::memcmp(bytes, magic, mlen) != 0) return 0;
+    if (!bytes || len < mlen + 1) return false;
+    if (std::memcmp(bytes, magic, mlen) != 0) return false;
     size_t i = mlen;
     if (bytes[i] == '\r') ++i;
-    if (i >= len || bytes[i] != '\n') return 0;
-    ++i;
-    while (i < len) {
-        if (bytes[i] == '\n') return i + 1;
-        if (bytes[i] == '\r') {
-            ++i;
-            if (i < len && bytes[i] == '\n') ++i;
-            return i;
-        }
-        while (i < len && bytes[i] != '\n' && bytes[i] != '\r') ++i;
-        if (i >= len) return 0;
-        if (bytes[i] == '\r') ++i;
-        if (i < len && bytes[i] == '\n') ++i;
+    if (i >= len || bytes[i] != '\n') return false;
+    *index = i + 1;
+    return true;
+}
+
+// A header line ends at CR or LF. A blank line ends the header.
+// False means the line never reached a newline.
+bool headerLine(const uint8_t *bytes, size_t len, size_t *index,
+                const uint8_t **line, size_t *lineLen, bool *blank) {
+    size_t i = *index;
+    if (i >= len) return false;
+    if (bytes[i] == '\n') {
+        *blank = true;
+        *line = bytes + i;
+        *lineLen = 0;
+        *index = i + 1;
+        return true;
     }
-    return 0;
+    if (bytes[i] == '\r') {
+        *blank = true;
+        *line = bytes + i;
+        *lineLen = 0;
+        ++i;
+        if (i < len && bytes[i] == '\n') ++i;
+        *index = i;
+        return true;
+    }
+    size_t start = i;
+    while (i < len && bytes[i] != '\n' && bytes[i] != '\r') ++i;
+    if (i >= len) return false;
+    *blank = false;
+    *line = bytes + start;
+    *lineLen = i - start;
+    if (bytes[i] == '\r') ++i;
+    if (i < len && bytes[i] == '\n') ++i;
+    *index = i;
+    return true;
+}
+
+HeaderScan scanHeader(const uint8_t *bytes, size_t len, const char *key, char *buf, size_t cap) {
+    HeaderScan scan;
+    size_t i = 0;
+    if (!headerMagic(bytes, len, &i)) return scan;
+    const size_t keyLen = key ? std::strlen(key) : 0;
+    while (i < len) {
+        const uint8_t *line = nullptr;
+        size_t lineLen = 0;
+        bool blank = false;
+        if (!headerLine(bytes, len, &i, &line, &lineLen, &blank)) return HeaderScan{};
+        if (blank) {
+            scan.payload = i;
+            return scan;
+        }
+        if (!key || keyLen == 0 || scan.field != 0) continue;
+        if (lineLen <= keyLen || std::memcmp(line, key, keyLen) != 0 || line[keyLen] != ' ') continue;
+        size_t vlen = lineLen - keyLen - 1;
+        if (!buf || vlen >= cap) {
+            scan.field = -1;
+            continue;
+        }
+        std::memcpy(buf, line + keyLen + 1, vlen);
+        buf[vlen] = 0;
+        scan.field = 1;
+    }
+    return HeaderScan{};
+}
+
+}  // namespace
+
+size_t gs2_dump_payload_offset(const uint8_t *bytes, size_t len) {
+    return scanHeader(bytes, len, nullptr, nullptr, 0).payload;
+}
+
+int gs2_ticket_field(const uint8_t *bytes, size_t len, const char *key, char *buf, size_t cap) {
+    if (!key || !buf || cap == 0) return 0;
+    buf[0] = 0;
+    HeaderScan scan = scanHeader(bytes, len, key, buf, cap);
+    if (scan.payload == 0) return 0;
+    return scan.field;
 }

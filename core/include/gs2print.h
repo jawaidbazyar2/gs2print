@@ -38,6 +38,13 @@ int gs2_job_save_pdf(gs2_job *job, const char *path);
  */
 size_t gs2_dump_payload_offset(const uint8_t *bytes, size_t len);
 
+/* Copies one GS2PRINT 1 header value into buf, NUL-terminated.
+ * Returns 1 when the field is present, 0 when the buffer is not a
+ * ticket or the field is absent, and -1 when the value does not fit.
+ */
+int gs2_ticket_field(const uint8_t *bytes, size_t len,
+                     const char *key, char *buf, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif

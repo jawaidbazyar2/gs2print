@@ -1,23 +1,250 @@
 import AppKit
-import Combine
 import SwiftUI
 
 @main
 struct GS2PrintApp: App {
-    @StateObject private var model = JobModel()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @StateObject private var appModel = AppModel()
 
     var body: some Scene {
-        WindowGroup {
-            ContentView(model: model)
+        Window("gs2print", id: "home") {
+            HomeRoot(appModel: appModel)
         }
-        .commands {
-            CommandGroup(replacing: .newItem) {
-                Button("Open…") {
-                    model.openPanel()
-                }
-                .keyboardShortcut("o", modifiers: .command)
+        .restorationBehavior(.disabled)
+        .commands { openCommands }
+
+        WindowGroup(id: "ticket", for: UUID.self) { $id in
+            TicketRoot(appModel: appModel, id: id)
+        }
+        .handlesExternalEvents(matching: [])
+        .restorationBehavior(.disabled)
+        .defaultLaunchBehavior(.suppressed)
+        .commands { openCommands }
+    }
+
+    @CommandsBuilder
+    private var openCommands: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("Open…") {
+                (appModel.focused ?? appModel.primary).openPanel()
+            }
+            .keyboardShortcut("o", modifiers: .command)
+        }
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    static var pending: [URL] = []
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        if let model = AppBridge.model {
+            for url in urls {
+                model.handleFile(url)
+            }
+        } else {
+            Self.pending.append(contentsOf: urls)
+        }
+    }
+
+    func application(_ sender: NSApplication, openFile filename: String) -> Bool {
+        application(sender, open: [URL(fileURLWithPath: filename)])
+        return true
+    }
+}
+
+private enum AppBridge {
+    static weak var model: AppModel?
+}
+
+@MainActor
+final class AppModel: ObservableObject {
+    let server = PrintServer()
+    let primary: JobModel
+    @Published private(set) var extras: [UUID: JobModel] = [:]
+
+    weak var focused: JobModel?
+    private var tcpSession: JobModel?
+    private var openExtra: ((UUID) -> Void)?
+    private var pendingExtras: [UUID] = []
+    private var seen: [String: Date] = [:]
+
+    init() {
+        let session = JobModel()
+        primary = session
+        AppBridge.model = self
+        session.closeTCP = { [weak self] in
+            self?.server.closeClient()
+        }
+        server.onClient = { [weak self] connected in
+            self?.tcpAttached(connected)
+        }
+        server.onBytes = { [weak self] data in
+            self?.tcpBytes(data)
+        }
+        server.onIdle = { [weak self] in
+            self?.tcpSession?.finishNetworkJob()
+        }
+        server.onDisconnect = { [weak self] in
+            guard let self else { return }
+            let session = self.tcpSession
+            self.tcpSession = nil
+            session?.ownsTCP = false
+            session?.finishNetworkJob()
+        }
+        server.restore()
+        let queued = AppDelegate.pending
+        AppDelegate.pending.removeAll()
+        for url in queued {
+            handleFile(url)
+        }
+    }
+
+    func model(for id: UUID) -> JobModel? {
+        extras[id]
+    }
+
+    func setOpener(_ open: @escaping (UUID) -> Void) {
+        openExtra = open
+        let pending = pendingExtras
+        pendingExtras.removeAll()
+        for id in pending {
+            open(id)
+        }
+    }
+
+    func closed(_ session: JobModel) {
+        let wasTCP = session.ownsTCP
+        session.shutdownConnection()
+        if wasTCP {
+            tcpSession = nil
+        }
+        if focused === session {
+            focused = nil
+        }
+        guard session !== primary else { return }
+        extras = extras.filter { $0.value !== session }
+    }
+
+    /// Finder and File → Open both land here. A second delivery of the same
+    /// path in the same moment is ignored, and so is a ticket whose socket
+    /// already has a live client.
+    func handleFile(_ url: URL) {
+        let path = url.resolvingSymlinksInPath().standardizedFileURL.path
+        let now = Date()
+        seen = seen.filter { now.timeIntervalSince($0.value) < 2 }
+        if let previous = seen[path], now.timeIntervalSince(previous) < 0.5 {
+            return
+        }
+        seen[path] = now
+
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            let session = focused ?? primary
+            session.show(error.localizedDescription)
+            session.raiseWindow()
+            return
+        }
+
+        switch classify(data) {
+        case .live(let socket):
+            if isLive(socket) { return }
+            let session = claimIdle()
+            session.openTicket(path: socket)
+        case .rejected(let message):
+            let session = claimIdle()
+            session.show(message)
+            session.raiseWindow()
+        case .dump:
+            let session = focused ?? primary
+            session.openDump(url)
+            session.raiseWindow()
+        }
+    }
+
+    private func tcpAttached(_ connected: Bool) {
+        guard connected, tcpSession == nil else { return }
+        let session = claimIdle()
+        session.ownsTCP = true
+        tcpSession = session
+    }
+
+    private func tcpBytes(_ data: Data) {
+        let session: JobModel
+        if let tcpSession {
+            session = tcpSession
+        } else {
+            session = claimIdle()
+            session.ownsTCP = true
+            tcpSession = session
+        }
+        session.receive(data)
+    }
+
+    private func claimIdle() -> JobModel {
+        if primary.isIdle { return primary }
+        if let existing = extras.values.first(where: { $0.isIdle }) {
+            return existing
+        }
+        let id = UUID()
+        let session = makeSession()
+        var next = extras
+        next[id] = session
+        extras = next
+        if let openExtra {
+            openExtra(id)
+        } else {
+            pendingExtras.append(id)
+        }
+        return session
+    }
+
+    private func makeSession() -> JobModel {
+        let session = JobModel()
+        session.closeTCP = { [weak self] in
+            self?.server.closeClient()
+        }
+        return session
+    }
+
+    private func isLive(_ path: String) -> Bool {
+        if primary.ticketPath == path && primary.ticket != nil { return true }
+        return extras.values.contains { $0.ticketPath == path && $0.ticket != nil }
+    }
+
+    private enum TicketKind {
+        case live(String)
+        case dump
+        case rejected(String)
+    }
+
+    private func classify(_ data: Data) -> TicketKind {
+        let socket = headerField(data, key: "socket", cap: 4096)
+        if socket.code < 0 {
+            return .rejected("Socket path is too long.")
+        }
+        if socket.code == 0 || socket.value.isEmpty {
+            return .dump
+        }
+        let printer = headerField(data, key: "printer", cap: 256)
+        if printer.code != 1 || printer.value != "imagewriter-ii" {
+            return .rejected("Unsupported printer.")
+        }
+        let socketPath = URL(fileURLWithPath: socket.value).resolvingSymlinksInPath().path
+        return .live(socketPath)
+    }
+
+    private func headerField(_ data: Data, key: String, cap: Int) -> (code: Int32, value: String) {
+        var buf = [CChar](repeating: 0, count: max(cap, 1))
+        let code = data.withUnsafeBytes { raw -> Int32 in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return 0 }
+            return key.withCString { keyPtr in
+                gs2_ticket_field(base, raw.count, keyPtr, &buf, buf.count)
             }
         }
+        if code != 1 { return (code, "") }
+        return (code, String(cString: buf))
     }
 }
 
@@ -31,11 +258,18 @@ final class JobModel: ObservableObject {
     @Published private(set) var printing = false
     @Published var pdfURL: URL?
     @Published var error = ""
+    @Published fileprivate(set) var ownsTCP = false
 
-    let server = PrintServer()
+    var closeTCP: (() -> Void)?
+    private(set) var ticket: TicketClient?
+    private(set) var ticketPath: String?
+
+    var isIdle: Bool {
+        ticket == nil && !ownsTCP && !networkJobOpen && !printing
+            && pdfURL == nil && image == nil && pageCount == 0 && error.isEmpty
+    }
 
     private var job: OpaquePointer?
-    private var cancellables = Set<AnyCancellable>()
     private var networkJobOpen = false
     private var sawBytes = false
     private var followTail = true
@@ -44,22 +278,7 @@ final class JobModel: ObservableObject {
     private var previewDirty = false
     private var previewScheduled = false
     private var previewDue = Date.distantPast
-
-    init() {
-        server.onBytes = { [weak self] data in
-            self?.receive(data)
-        }
-        server.onIdle = { [weak self] in
-            self?.finishNetworkJob()
-        }
-        server.onDisconnect = { [weak self] in
-            self?.finishNetworkJob()
-        }
-        server.objectWillChange.sink { [weak self] _ in
-            self?.objectWillChange.send()
-        }.store(in: &cancellables)
-        server.restore()
-    }
+    private weak var window: NSWindow?
 
     func openPanel() {
         let panel = NSOpenPanel()
@@ -68,11 +287,21 @@ final class JobModel: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.title = "Open printer dump"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        open(url)
+        openDump(url)
     }
 
-    func closeServerJob() {
-        server.closeClient()
+    func closeActiveJob() {
+        if ticket != nil || ownsTCP {
+            relinquishStream()
+        }
+    }
+
+    func canCloseJob(serverConnected: Bool) -> Bool {
+        ticket != nil || (ownsTCP && serverConnected)
+    }
+
+    func show(_ text: String) {
+        error = text
     }
 
     func step(_ delta: Int) {
@@ -90,8 +319,12 @@ final class JobModel: ObservableObject {
         }
     }
 
-    private func open(_ url: URL) {
-        finishNetworkJob()
+    func attach(_ window: NSWindow) {
+        self.window = window
+    }
+
+    func openDump(_ url: URL) {
+        relinquishStream()
         error = ""
         pdfURL = nil
         followTail = false
@@ -138,7 +371,53 @@ final class JobModel: ObservableObject {
         }
     }
 
-    private func receive(_ data: Data) {
+    func openTicket(path: String) {
+        relinquishStream()
+        error = ""
+        pdfURL = nil
+        image = nil
+        pageIndex = 0
+        pageCount = 0
+        message = "Connecting"
+        printing = true
+        ticketPath = path
+        let client = TicketClient(path: path)
+        ticket = client
+        client.onBytes = { [weak self, weak client] data in
+            guard let self, self.ticket === client else { return }
+            self.receive(data)
+        }
+        client.onReady = { [weak self, weak client] in
+            guard let self, self.ticket === client else { return }
+            self.message = "Printing"
+            self.printing = true
+            self.raiseWindow()
+        }
+        client.onIdle = { [weak self, weak client] in
+            guard let self, self.ticket === client else { return }
+            self.relinquishStream()
+        }
+        client.onClosed = { [weak self, weak client] in
+            guard let self, self.ticket === client else { return }
+            self.relinquishStream()
+        }
+        client.onFailed = { [weak self, weak client] text in
+            guard let self, self.ticket === client else { return }
+            self.ticket = nil
+            self.ticketPath = nil
+            self.printing = false
+            self.error = text
+            self.message = "Open a printer dump."
+        }
+        raiseWindow()
+        client.start()
+    }
+
+    func shutdownConnection() {
+        relinquishStream()
+    }
+
+    func receive(_ data: Data) {
         guard !data.isEmpty else { return }
         if !networkJobOpen {
             beginNetworkJob()
@@ -153,71 +432,7 @@ final class JobModel: ObservableObject {
         noteInk()
     }
 
-    private func beginNetworkJob() {
-        previewGeneration += 1
-        pdfURL = nil
-        if let old = job {
-            gs2_job_free(old)
-            job = nil
-        }
-        guard let created = gs2_job_new() else {
-            error = "Could not start a print job."
-            networkJobOpen = false
-            return
-        }
-        job = created
-        networkJobOpen = true
-        sawBytes = false
-        followTail = true
-        pageIndex = 0
-        pageCount = 1
-        error = ""
-        message = "Printing"
-        printing = true
-        raiseWindow()
-    }
-
-    /// The app is often already running, behind whatever is printing.
-    /// The first bytes of a job bring its window forward. Later bytes
-    /// on that same job do not, because this runs only when a job opens.
-    private func raiseWindow() {
-        if NSApp.isHidden {
-            NSApp.unhide(nil)
-        }
-        NSApp.activate(ignoringOtherApps: true)
-        present(allowOpen: true)
-        // deminiaturize is ignored until the app is active, and activation
-        // does not finish in this turn.
-        DispatchQueue.main.async { [weak self] in
-            self?.present(allowOpen: false)
-        }
-    }
-
-    /// A miniaturized window reports `canBecomeMain` as false, so the
-    /// filter keeps it. With no window left, the Dock's untitled-file
-    /// path is what opens this scene again.
-    private func present(allowOpen: Bool) {
-        var windows = NSApp.windows.filter { $0.canBecomeMain || $0.isMiniaturized }
-        if windows.isEmpty, allowOpen {
-            _ = NSApp.delegate?.applicationOpenUntitledFile?(NSApp)
-            windows = NSApp.windows.filter { $0.canBecomeMain || $0.isMiniaturized }
-        }
-        show(windows)
-    }
-
-    private func show(_ windows: [NSWindow]) {
-        for window in windows {
-            if window.isMiniaturized {
-                window.deminiaturize(nil)
-            }
-            window.makeKeyAndOrderFront(nil)
-            window.orderFrontRegardless()
-        }
-    }
-
-    /// Idle and socket close both end the job. A second call is a no-op, and
-    /// a connection that never sent bytes does not write a PDF.
-    private func finishNetworkJob() {
+    func finishNetworkJob() {
         guard networkJobOpen else { return }
         networkJobOpen = false
         printing = false
@@ -248,6 +463,86 @@ final class JobModel: ObservableObject {
             pdfURL = nil
             error = "Could not write \(pdf.lastPathComponent)."
         }
+    }
+
+    /// The window for this job comes forward. A ticket does this as soon as
+    /// the file is accepted, before any printer bytes arrive.
+    func raiseWindow() {
+        raise(attempt: 0)
+    }
+
+    private func relinquishStream() {
+        if let client = ticket {
+            ticket = nil
+            ticketPath = nil
+            client.stop()
+            if networkJobOpen {
+                finishNetworkJob()
+            } else {
+                printing = false
+                if pdfURL == nil && image == nil {
+                    message = "Open a printer dump."
+                }
+            }
+            return
+        }
+        if ownsTCP {
+            ownsTCP = false
+            closeTCP?()
+            return
+        }
+        if networkJobOpen {
+            finishNetworkJob()
+        }
+    }
+
+    private func raise(attempt: Int) {
+        if NSApp.isHidden {
+            NSApp.unhide(nil)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        if let window {
+            if window.isMiniaturized {
+                window.deminiaturize(nil)
+            }
+            window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
+            if attempt == 0 {
+                DispatchQueue.main.async { [weak self] in
+                    self?.raise(attempt: 1)
+                }
+            }
+            return
+        }
+        if attempt < 8 {
+            DispatchQueue.main.async { [weak self] in
+                self?.raise(attempt: attempt + 1)
+            }
+        }
+    }
+
+    private func beginNetworkJob() {
+        previewGeneration += 1
+        pdfURL = nil
+        if let old = job {
+            gs2_job_free(old)
+            job = nil
+        }
+        guard let created = gs2_job_new() else {
+            error = "Could not start a print job."
+            networkJobOpen = false
+            return
+        }
+        job = created
+        networkJobOpen = true
+        sawBytes = false
+        followTail = true
+        pageIndex = 0
+        pageCount = 1
+        error = ""
+        message = "Printing"
+        printing = true
+        raiseWindow()
     }
 
     private func noteInk() {
@@ -347,7 +642,6 @@ final class JobModel: ObservableObject {
         }
         return source.deletingLastPathComponent().appendingPathComponent(pdfName)
     }
-
 }
 
 /// Full 720 dpi page, one gray byte per printer pixel. The view scales this
@@ -407,14 +701,22 @@ private let previewMaxLongSide: CGFloat = 4000
 
 struct ContentView: View {
     @ObservedObject var model: JobModel
+    @ObservedObject var server: PrintServer
+    var onKey: () -> Void = {}
+    var onClose: () -> Void = {}
+
     @Environment(\.displayScale) private var displayScale
+    @Environment(\.controlActiveState) private var controlActive
     @State private var portText: String
     @State private var scaleMode: PreviewScale = .fitHeight
     @State private var viewport = CGSize.zero
 
-    init(model: JobModel) {
+    init(model: JobModel, server: PrintServer, onKey: @escaping () -> Void = {}, onClose: @escaping () -> Void = {}) {
         self.model = model
-        _portText = State(initialValue: String(model.server.port))
+        self.server = server
+        self.onKey = onKey
+        self.onClose = onClose
+        _portText = State(initialValue: String(server.port))
     }
 
     var body: some View {
@@ -470,6 +772,18 @@ struct ContentView: View {
         }
         .padding()
         .frame(minWidth: 720, minHeight: 640)
+        .background {
+            WindowLifetime(onWindow: { model.attach($0) }, onClose: onClose)
+        }
+        .onAppear {
+            if controlActive == .key { onKey() }
+        }
+        .onChange(of: controlActive) { _, state in
+            if state == .key { onKey() }
+        }
+        .onChange(of: server.port) { _, port in
+            portText = String(port)
+        }
     }
 
     /// "Printing" while bytes are still arriving, with the spinner lit
@@ -564,16 +878,16 @@ struct ContentView: View {
                     .onSubmit { commitPortText(retry: true) }
                 Toggle("Other computers", isOn: lanBinding)
                 Spacer(minLength: 0)
-                Button("Close Job") { model.closeServerJob() }
-                    .disabled(!model.server.clientConnected)
+                Button("Close Job") { model.closeActiveJob() }
+                    .disabled(!model.canCloseJob(serverConnected: server.clientConnected))
             }
-            if !model.server.address.isEmpty {
-                Text(model.server.address)
+            if !server.address.isEmpty {
+                Text(server.address)
                     .font(.caption)
                     .textSelection(.enabled)
             }
-            if !model.server.bindError.isEmpty {
-                Text(model.server.bindError)
+            if !server.bindError.isEmpty {
+                Text(server.bindError)
                     .font(.caption)
                     .foregroundStyle(.red)
                     .textSelection(.enabled)
@@ -583,30 +897,127 @@ struct ContentView: View {
 
     private var listenBinding: Binding<Bool> {
         Binding(
-            get: { model.server.listening },
+            get: { server.listening },
             set: { on in
                 if on, !commitPortText(retry: false) { return }
-                model.server.listening = on
+                server.listening = on
             }
         )
     }
 
     private var lanBinding: Binding<Bool> {
         Binding(
-            get: { model.server.allowLAN },
+            get: { server.allowLAN },
             set: { on in
                 if !commitPortText(retry: false) { return }
-                model.server.allowLAN = on
+                server.allowLAN = on
             }
         )
     }
 
     @discardableResult
     private func commitPortText(retry: Bool) -> Bool {
-        let ok = model.server.commitPort(portText, rebindIfUnchanged: retry)
+        let ok = server.commitPort(portText, rebindIfUnchanged: retry)
         if ok {
-            portText = String(model.server.port)
+            portText = String(server.port)
         }
         return ok
+    }
+}
+
+private struct HomeRoot: View {
+    @ObservedObject var appModel: AppModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        ContentView(
+            model: appModel.primary,
+            server: appModel.server,
+            onKey: { appModel.focused = appModel.primary },
+            onClose: { appModel.closed(appModel.primary) }
+        )
+        .onAppear {
+            appModel.setOpener { id in
+                openWindow(id: "ticket", value: id)
+            }
+        }
+        .onOpenURL { url in
+            appModel.handleFile(url)
+        }
+    }
+}
+
+private struct TicketRoot: View {
+    @ObservedObject var appModel: AppModel
+    let id: UUID?
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        if let id, let model = appModel.model(for: id) {
+            ContentView(
+                model: model,
+                server: appModel.server,
+                onKey: { appModel.focused = model },
+                onClose: { appModel.closed(model) }
+            )
+            .onAppear {
+                appModel.setOpener { ticketID in
+                    openWindow(id: "ticket", value: ticketID)
+                }
+            }
+        }
+    }
+}
+
+private struct WindowLifetime: NSViewRepresentable {
+    var onWindow: (NSWindow) -> Void
+    var onClose: () -> Void
+
+    func makeNSView(context: Context) -> LifetimeView {
+        let view = LifetimeView()
+        view.onWindow = onWindow
+        view.onClose = onClose
+        return view
+    }
+
+    func updateNSView(_ view: LifetimeView, context: Context) {
+        view.onWindow = onWindow
+        view.onClose = onClose
+    }
+}
+
+private final class LifetimeView: NSView {
+    var onWindow: ((NSWindow) -> Void)?
+    var onClose: (() -> Void)?
+    private var observing: NSWindow?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let observing {
+            NotificationCenter.default.removeObserver(self, name: NSWindow.willCloseNotification, object: observing)
+            self.observing = nil
+        }
+        guard let window else { return }
+        observing = window
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(willClose(_:)),
+            name: NSWindow.willCloseNotification,
+            object: window)
+        onWindow?(window)
+    }
+
+    @objc private func willClose(_ note: Notification) {
+        let close = onClose
+        onClose = nil
+        DispatchQueue.main.async {
+            close?()
+        }
+    }
+
+    deinit {
+        if let observing {
+            NotificationCenter.default.removeObserver(self, name: NSWindow.willCloseNotification, object: observing)
+        }
     }
 }

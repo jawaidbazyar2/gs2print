@@ -319,6 +319,8 @@ private final class EventBuffer {
         case idle
         case client(Bool)
         case closed
+        case ready
+        case failed(String)
     }
 
     private let lock = NSLock()
@@ -378,6 +380,7 @@ final class PrintServer: ObservableObject {
     var onBytes: ((Data) -> Void)?
     var onIdle: (() -> Void)?
     var onDisconnect: (() -> Void)?
+    var onClient: ((Bool) -> Void)?
 
     private let events = EventBuffer()
     private let loop: SocketLoop
@@ -480,9 +483,220 @@ final class PrintServer: ObservableObject {
                 onIdle?()
             case .client(let connected):
                 clientConnected = connected
+                onClient?(connected)
             case .closed:
                 clientConnected = false
                 onDisconnect?()
+            case .ready, .failed:
+                break
+            }
+        }
+    }
+}
+
+/// One GS2 ticket. Connects to the `AF_UNIX` path in the ticket and reads
+/// printer bytes. GS2 owns the socket file; this side never binds or unlinks it.
+final class TicketClient {
+    let path: String
+
+    var onBytes: ((Data) -> Void)?
+    var onReady: (() -> Void)?
+    var onIdle: (() -> Void)?
+    var onClosed: (() -> Void)?
+    var onFailed: ((String) -> Void)?
+
+    private enum Dial {
+        case ok(Int32)
+        case tooLong
+        case failed(Int32)
+    }
+
+    private let queue = DispatchQueue(label: "gs2print.ticket")
+    private let idleQueue = DispatchQueue(label: "gs2print.ticket.idle")
+    private let stateLock = NSLock()
+    private let events = EventBuffer()
+    private var fd: Int32 = -1
+    private var idleItem: DispatchWorkItem?
+    private var stopRequested = false
+    private var readBuffer = [UInt8](repeating: 0, count: 16384)
+
+    init(path: String) {
+        self.path = path
+        events.onMain = { [weak self] in
+            self?.drain()
+        }
+    }
+
+    deinit {
+        idleItem?.cancel()
+        let current = takeFd()
+        if current >= 0 {
+            shutdown(current, SHUT_RDWR)
+            close(current)
+        }
+    }
+
+    func start() {
+        queue.async { [weak self] in
+            self?.connectAndRead()
+        }
+    }
+
+    /// Unblocks the read. The caller finishes the job; no event is posted.
+    func stop() {
+        stateLock.lock()
+        stopRequested = true
+        let current = fd
+        stateLock.unlock()
+        idleItem?.cancel()
+        if current >= 0 {
+            shutdown(current, SHUT_RDWR)
+        }
+    }
+
+    private func connectAndRead() {
+        stateLock.lock()
+        let stopped = stopRequested
+        stateLock.unlock()
+        if stopped { return }
+        switch dial() {
+        case .ok(let opened):
+            stateLock.lock()
+            let stopped = stopRequested
+            if !stopped {
+                fd = opened
+            }
+            stateLock.unlock()
+            if stopped {
+                close(opened)
+                return
+            }
+            events.push(.ready)
+            armIdle()
+            readLoop(opened)
+        case .tooLong:
+            events.push(.failed("Socket path is too long."))
+        case .failed(let err):
+            events.push(.failed(explain(err)))
+        }
+    }
+
+    private func dial() -> Dial {
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let cap = MemoryLayout.size(ofValue: addr.sun_path)
+        let encoded = Array(path.utf8CString)
+        if encoded.isEmpty || encoded.count > cap {
+            return .tooLong
+        }
+        withUnsafeMutableBytes(of: &addr.sun_path) { raw in
+            for index in 0..<encoded.count {
+                raw[index] = UInt8(bitPattern: encoded[index])
+            }
+        }
+        addr.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        if fd < 0 { return .failed(errno) }
+        var nosig: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosig, socklen_t(MemoryLayout<Int32>.size))
+        _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
+
+        var err: Int32 = 0
+        let rc: Int32 = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                let result = connect(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
+                if result != 0 { err = errno }
+                return result
+            }
+        }
+        if rc != 0 {
+            close(fd)
+            return .failed(err)
+        }
+        return .ok(fd)
+    }
+
+    private func explain(_ err: Int32) -> String {
+        "Could not connect to \(path): \(String(cString: strerror(err)))"
+    }
+
+    /// Blocking read. A dispatch source on this socket can miss the peer's
+    /// close, so the job would stay open and never write its PDF.
+    private func readLoop(_ opened: Int32) {
+        while true {
+            stateLock.lock()
+            let stopped = stopRequested
+            stateLock.unlock()
+            if stopped { break }
+            let n = readBuffer.withUnsafeMutableBytes { raw -> Int in
+                guard let base = raw.baseAddress else { return -1 }
+                return recv(opened, base, raw.count, 0)
+            }
+            if n > 0 {
+                events.push(.bytes(Data(readBuffer[..<n])))
+                armIdle()
+                continue
+            }
+            if n < 0 && errno == EINTR { continue }
+            break
+        }
+        idleItem?.cancel()
+        let mine = takeFd()
+        if mine >= 0 {
+            close(mine)
+        }
+        stateLock.lock()
+        let stopped = stopRequested
+        stateLock.unlock()
+        if !stopped {
+            events.push(.closed)
+        }
+    }
+
+    private func armIdle() {
+        idleItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            self?.cutOff()
+        }
+        idleItem = item
+        idleQueue.asyncAfter(deadline: .now() + 10, execute: item)
+    }
+
+    /// Wakes the blocking read. The read loop reports the close, which ends
+    /// the job the same way a hangup from GS2 does.
+    private func cutOff() {
+        stateLock.lock()
+        let current = fd
+        stateLock.unlock()
+        if current >= 0 {
+            shutdown(current, SHUT_RDWR)
+        }
+    }
+
+    private func takeFd() -> Int32 {
+        stateLock.lock()
+        let current = fd
+        fd = -1
+        stateLock.unlock()
+        return current
+    }
+
+    private func drain() {
+        for event in events.take() {
+            switch event {
+            case .bytes(let data):
+                onBytes?(data)
+            case .ready:
+                onReady?()
+            case .idle:
+                onIdle?()
+            case .closed:
+                onClosed?()
+            case .failed(let message):
+                onFailed?(message)
+            case .client:
+                break
             }
         }
     }
