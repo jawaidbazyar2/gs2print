@@ -4,6 +4,11 @@
 #include <cstring>
 #include <string>
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 namespace {
 
 int g_failed = 0;
@@ -147,6 +152,23 @@ void testReverse() {
     gs2_job_free(job);
 }
 
+std::string pdfTestPath() {
+#if defined(_WIN32)
+    wchar_t buf[MAX_PATH];
+    DWORD n = GetTempPathW(MAX_PATH, buf);
+    std::wstring wide = n > 0 && n < MAX_PATH ? std::wstring(buf, n) : L".\\";
+    wide += L"gs2print-test.pdf";
+    int need = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string out(need > 1 ? static_cast<size_t>(need - 1) : 0, '\0');
+    if (need > 1) {
+        WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, out.data(), need, nullptr, nullptr);
+    }
+    return out;
+#else
+    return "/tmp/gs2print-test.pdf";
+#endif
+}
+
 void testFormFeedAndPdf() {
     gs2_job *job = gs2_job_new();
     writeStr(job, "A\fB");
@@ -158,7 +180,8 @@ void testFormFeedAndPdf() {
     expect(gs2_job_page_count(job) == 2, "form feed yields two pages");
     expect(bounds(job, 0).any && bounds(job, 1).any, "each page has ink");
 
-    const char *path = "/tmp/gs2print-test.pdf";
+    const std::string pdfPath = pdfTestPath();
+    const char *path = pdfPath.c_str();
     std::remove(path);
     expect(gs2_job_save_pdf(job, path) == 0, "pdf saves");
     FILE *f = std::fopen(path, "rb");
