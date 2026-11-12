@@ -42,7 +42,9 @@ That builds `build\gs2print.exe` and runs `build\gs2print_tests.exe`. See [Windo
 
 ### GSSquared
 
-GSSquared works by creating a "Ticket" file named "something.gs2print", then asking the operating system to open that file. As long as you have run gs2print once before, it will be registered with your operating system. Then gs2print will open a connection back to GSSquared for the print session.
+GSSquared works by creating a "Ticket" file named "something.gs2print", then asking the operating system to open that file. As long as you have run gs2print once before, it will be registered with your operating system. Then gs2print will open a connection back to GSSquared for the print session. This works only on the local machine of course, but provides a tight integration with GSSquared.
+
+Eventually GSSquared will allow entering arbitrary IP:Port and then you can use it like with KEGS below to a print server on any machine on your network.
 
 ### KEGS
 
