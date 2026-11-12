@@ -2,6 +2,11 @@
 
 macOS app that turns an ImageWriter II byte stream into a page preview and a PDF. Open a raw dump (`GS2.SSC*`, `GS2.PARL*`, or any headerless printer capture) or a saved `GS2PRINT 1` dump. The PDF is written next to that dump, with the same basename. A live ticket names a local socket; the PDF for that job is saved in Documents.
 
+## Requirements
+
+- **Windows:** Windows 10 version 1903 (May 2019 Update) or later, 64-bit (x64). Windows 11 works. `gs2print.exe` is a single file and needs no installer, runtime, or redistributable; copy it anywhere and run it. The first run registers `.gs2print` for the current user.
+- **macOS:** macOS 26 or later.
+
 The decoder and page bitmap live in `core/`. The SwiftUI window in `app/` only displays that bitmap and calls the C API in `core/include/gs2print.h`. PDF pages are written with the vendored copy of [libHaru](https://github.com/libharu/libharu).
 
 ## Build
