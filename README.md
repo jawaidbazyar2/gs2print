@@ -6,6 +6,8 @@ The decoder and page bitmap live in `core/`. The SwiftUI window in `app/` only d
 
 ## Build
 
+### MacOS
+
 Requires Xcode with the macOS 26 SDK. zlib is the system library; nothing else is fetched at build time.
 
 Open `gs2print.xcodeproj` and run the **gs2print** scheme.
@@ -25,6 +27,8 @@ xcodebuild -project gs2print.xcodeproj -scheme gs2print_tests -configuration Deb
 ```
 
 `build/` and Xcode’s `DerivedData/` are gitignored.
+
+### Windows
 
 On Windows, install Build Tools for Visual Studio 2022 with the C++ workload, CMake, and Ninja. The Visual Studio IDE is not required. From the repo root:
 
