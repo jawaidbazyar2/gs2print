@@ -2,6 +2,7 @@
 
 #include "ui.hpp"
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -21,7 +22,8 @@ struct PagePreview {
     int width() const { return imgW; }
     int height() const { return imgH; }
 
-    void submit(std::vector<uint8_t> bits, int width, int height, int stride, uint64_t generation);
+    void submit(std::array<std::vector<uint8_t>, 4> planes, int width, int height, int stride,
+                uint64_t generation);
     void complete();
     void notePage(int page);
 

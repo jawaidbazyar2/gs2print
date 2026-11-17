@@ -306,6 +306,7 @@ void ImageWriter::handleEsc(uint8_t ch) {
         state_ = State::CustomKey;
         break;
     case 'c':
+        flushLine();
         pitch_ = 1;
         proportional_ = false;
         bold_ = underline_ = halfHeight_ = doubleWidth_ = false;
@@ -324,6 +325,7 @@ void ImageWriter::handleEsc(uint8_t ch) {
         pendingCR_ = false;
         deselected_ = false;
         tabs_.clear();
+        colorMask_ = 1u << 3;
         state_ = State::Ground;
         break;
     default:
@@ -333,8 +335,25 @@ void ImageWriter::handleEsc(uint8_t ch) {
 
 void ImageWriter::paramByte(uint8_t ch) {
     switch (paramCmd_) {
-    case 'K':
+    case 'K': {
+        int n = -1;
+        if (ch >= '0' && ch <= '6') n = ch - '0';
+        else if (ch <= 6) n = ch;
+        static const unsigned kMasks[] = {
+            1u << 3,              // black
+            1u << 0,              // yellow
+            1u << 1,              // magenta
+            1u << 2,              // cyan
+            (1u << 0) | (1u << 1), // orange
+            (1u << 0) | (1u << 2), // green
+            (1u << 1) | (1u << 2), // purple
+        };
+        if (n >= 0 && n <= 6) {
+            flushLine();
+            colorMask_ = kMasks[n];
+        }
         break;
+    }
     case 'a': {
         int sel = ch & 0x0F;
         if (sel == 0) quality_ = Quality::Corr;
@@ -739,7 +758,7 @@ void ImageWriter::formFeed() {
 }
 
 void ImageWriter::flushLine() {
-    for (const Rect &r : line_) paper_->ink(r.x, r.y, r.w, r.h);
+    for (const Rect &r : line_) paper_->ink(r.x, r.y, r.w, r.h, colorMask_);
     line_.clear();
 }
 

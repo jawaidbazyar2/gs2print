@@ -13,7 +13,7 @@
 class Paper {
 public:
     virtual ~Paper() = default;
-    virtual void ink(int x, int y, int w, int h) = 0;
+    virtual void ink(int x, int y, int w, int h, unsigned planes) = 0;
     virtual void formFeed() = 0;
 };
 
@@ -128,6 +128,8 @@ private:
     int pendingDots_ = 0;
     int customMax_ = 8;
     CustomFont customFont_ = CustomFont::None;
+    // Bit 0 yellow, bit 1 magenta, bit 2 cyan, bit 3 black. Power-on is black.
+    unsigned colorMask_ = 1u << 3;
 
     // Pitch index 0..7: extended, pica, elite, semicondensed, condensed,
     // ultracondensed, proportional pica, proportional elite.

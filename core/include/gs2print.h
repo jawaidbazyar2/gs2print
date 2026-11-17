@@ -30,11 +30,19 @@ void gs2_job_finish(gs2_job *job);
 int gs2_job_page_count(gs2_job *job);
 
 /* Packed 1-bit, top-down, bit 7 is the leftmost pixel, 720 dpi.
- * NULL if page is out of range. The pointer is valid until the next
- * gs2_job_page_bits, gs2_job_write, or gs2_job_finish.
+ * plane 0 yellow, 1 magenta, 2 cyan, 3 black.
+ * NULL if page or plane is out of range. The pointer is valid until the
+ * next gs2_job_page_bits, gs2_job_write, or gs2_job_finish.
  */
-const uint8_t *gs2_job_page_bits(gs2_job *job, int page,
+const uint8_t *gs2_job_page_bits(gs2_job *job, int page, int plane,
                                  int *width, int *height, int *stride);
+
+/* Multiply the four 1-bit planes onto white paper. rgb is width*height*3,
+ * packed RGB, one byte per channel. A NULL plane is treated as empty.
+ */
+void gs2_planes_composite(const uint8_t *const planes[4],
+                          int width, int height, int stride,
+                          uint8_t *rgb);
 
 /* 0 on success, -1 on failure. */
 int gs2_job_save_pdf(gs2_job *job, const char *path);

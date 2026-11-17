@@ -11,6 +11,11 @@
 #include <mutex>
 #include <thread>
 
+namespace {
+// Guest software can pause for a long time in the middle of one job.
+constexpr unsigned long long kJobIdleMs = 60000;
+}
+
 TicketClient::TicketClient(std::string path, HWND hwnd) : path(std::move(path)), hwnd(hwnd) {}
 
 TicketClient::~TicketClient() { stop(); }
@@ -106,7 +111,7 @@ void TicketClient::readerMain() {
         publishPipe(handle);
         if (stopRequested) return;
         push(Event{Kind::Ready, {}, {}});
-        idleDeadline = GetTickCount64() + 10000;
+        idleDeadline = GetTickCount64() + kJobIdleMs;
         uint8_t buf[16384];
         for (;;) {
             if (stopRequested) break;
@@ -118,7 +123,7 @@ void TicketClient::readerMain() {
             bytes.kind = Kind::Bytes;
             bytes.bytes.assign(buf, buf + n);
             push(std::move(bytes));
-            idleDeadline = GetTickCount64() + 10000;
+            idleDeadline = GetTickCount64() + kJobIdleMs;
         }
         if (!stopRequested) push(Event{Kind::Closed, {}, {}});
         return;
@@ -153,7 +158,7 @@ void TicketClient::readerMain() {
     publishSocket(fd);
     if (stopRequested) return;
     push(Event{Kind::Ready, {}, {}});
-    idleDeadline = GetTickCount64() + 10000;
+    idleDeadline = GetTickCount64() + kJobIdleMs;
     uint8_t buf[16384];
     for (;;) {
         if (stopRequested) break;
@@ -165,7 +170,7 @@ void TicketClient::readerMain() {
         bytes.kind = Kind::Bytes;
         bytes.bytes.assign(buf, buf + n);
         push(std::move(bytes));
-        idleDeadline = GetTickCount64() + 10000;
+        idleDeadline = GetTickCount64() + kJobIdleMs;
     }
     if (!stopRequested) push(Event{Kind::Closed, {}, {}});
 }

@@ -50,7 +50,7 @@ Draw every page as a bitmap. Embedded PDF fonts would make smaller, selectable t
 
 The print head has 9 pins at 1/72 inch. Paper moves in 1/144 inch steps, which is how double-density output works. Graphics mode uses the top 8 pins, one byte per column. Buffer a page or more, because the paper can move up and down, not only forward.
 
-Commands are ESC sequences: graphics, tabs, character set, and the two software-switch banks (`ESC Z a b` opens switches, `ESC D a b` closes them). An ESC followed by an unknown byte is ignored along with that byte. Colour (the four-band ribbon) can wait; the monochrome draft face is the first one to render.
+Commands are ESC sequences: graphics, tabs, character set, colour (`ESC K n`), and the two software-switch banks (`ESC Z a b` opens switches, `ESC D a b` closes them). An ESC followed by an unknown byte is ignored along with that byte.
 
 ### Fonts
 
@@ -74,13 +74,13 @@ One library turns printer bytes into pages. The platform frontends only display 
 
 Write it in C++. The printer is a stateful object: head position, switch banks, tabs, the custom character set, and the page under the head. That is the same language as GSSquared, and libHaru's C API calls from C++ directly.
 
-Export a small C API for the frontends. Swift and AppKit on macOS, a Win32 window on Windows, and GTK on Linux can all call C. They should not depend on the C++ ABI. The C functions are: feed bytes, read the current page bitmap (pointer, width, height, stride), and finish the job.
+Export a small C API for the frontends. Swift and AppKit on macOS, a Win32 window on Windows, and GTK on Linux can all call C. They should not depend on the C++ ABI. The C functions are: feed bytes, read the current page planes (pointer, width, height, stride, one plane at a time), and finish the job.
 
-The head is placed at 1440 dpi. That grid divides the wire pitch (1/72 inch), the paper step (1/144 inch), and the graphics densities 72, 80, 96, 120, 144, and 160. The stored page is 720 dpi, one black 1-bit layer: each dot rectangle is rounded onto that grid when it is drawn, two grid units per pixel. The page under the head is uncompressed, so dots can be painted as bytes arrive. A form feed, or the end of the job, commits that page. The core deflates it with a PNG Up row predictor and starts a fresh uncompressed page. Reading a committed page inflates it. The frontend redraws from the bitmap as bytes arrive, so the preview is the page in progress.
+The head is placed at 1440 dpi. That grid divides the wire pitch (1/72 inch), the paper step (1/144 inch), and the graphics densities 72, 80, 96, 120, 144, and 160. The stored page is 720 dpi, four packed 1-bit planes, one per ribbon band: each dot rectangle is rounded onto that grid when it is drawn, two grid units per pixel. The page under the head is uncompressed, so dots can be painted as bytes arrive. A form feed, or the end of the job, commits that page. The core deflates each plane with a PNG Up row predictor and starts a fresh uncompressed page. Reading a committed page inflates it. The frontend redraws from the planes as bytes arrive, so the preview is the page in progress.
 
 ### PDF
 
-libHaru writes the PDF when the job ends, at `GS2-Print-YYYYMMDD-HHMMSS.pdf`. Each page is one 1-bit image of the 720 dpi bitmap, Flate-compressed with PNG predictor 12, the same Up filter as a committed page. The image is drawn at 8.5 by 11 inches. There is no embedded font. Colour stays out; the page is a single black layer. The on-screen preview stays the bitmap; the frontend does not re-read the PDF to draw it.
+libHaru writes the PDF when the job ends, at `GS2-Print-YYYYMMDD-HHMMSS.pdf`. Each page is four 1-bit images of the 720 dpi planes, Flate-compressed with PNG predictor 12, the same Up filter as a committed page. The images are drawn at 8.5 by 11 inches as PDF layers. There is no embedded font. The on-screen preview composites the four planes; the frontend does not re-read the PDF to draw it.
 
 ## Connection
 
@@ -110,11 +110,11 @@ The app has three jobs:
 - File → Open: read a raw printer dump and write a PDF, with no emulator running.
 - A server: listen for a raw TCP connection from anything else that can open one.
 
-The window is a small native UI on each platform: the page bitmap from the core, and a button that closes the job. After a PDF is written, its file name is shown at the bottom of the window. That name is a link. Clicking it asks the operating system to open the PDF (`open` on macOS, `ShellExecute` on Windows, `xdg-open` on Linux).
+The window is a small native UI on each platform: the composited page from the core, and a button that closes the job. After a PDF is written, its file name is shown at the bottom of the window. That name is a link. Clicking it asks the operating system to open the PDF (`open` on macOS, `ShellExecute` on Windows, `xdg-open` on Linux).
 
 Settings… opens a window with one section per printer. ImageWriter’s first switch is SW1-8, line feed after carriage return. It ships open, so a carriage return returns the head and does not feed. The saved position is the power-on DIP for the next job. A job already printing keeps the position it started with. The guest can still close or open that switch with `ESC D` / `ESC Z`.
 
-The preview shows one page at a time. Its scale buttons are +, −, fit width, and fit height. + draws the page larger and − draws it smaller. Fit width scales the page so its width matches the view; fit height scales it so its height matches the view. While either fit is selected, resizing the window changes the scale to keep that fit. + or − leaves fit and holds the scale the user picked. The view of each page scrolls horizontally and vertically, so the user can move to any part of a page drawn larger than the window. Scaling and scrolling are display only. The bitmap and the PDF stay at 720 dpi.
+The preview shows one page at a time. Its scale buttons are +, −, fit width, and fit height. + draws the page larger and − draws it smaller. Fit width scales the page so its width matches the view; fit height scales it so its height matches the view. While either fit is selected, resizing the window changes the scale to keep that fit. + or − leaves fit and holds the scale the user picked. The view of each page scrolls horizontally and vertically, so the user can move to any part of a page drawn larger than the window. Scaling and scrolling are display only. The planes and the PDF stay at 720 dpi.
 
 The sidecar registers itself as the handler for `.gs2print` when the user installs or first runs it. That is a UTI in its macOS bundle, an HKCU ProgID on Windows (same idea as [ProtocolHandlers.md](ProtocolHandlers.md) for `.gs2`), and a `.desktop` MIME type on Linux. A zip or AppImage only gains the association after that registration.
 
@@ -177,7 +177,7 @@ File → Open takes a raw printer dump, the headerless byte stream a `file` capt
 
 The job ends when any of these happen:
 
-- About 10 seconds pass with no bytes, matching the capture-file idle close.
+- About 60 seconds pass with no bytes. Guest software can pause that long in the middle of one job.
 - Ctrl-Reset sends `MESSAGE_CLOSE`.
 - The user presses the sidecar's close-job button, which closes its end of the socket.
 - GS2 closes its end.
@@ -188,7 +188,7 @@ The sidecar finishes the page, the core saves the libHaru document to `GS2-Print
 
 Server mode is for clients that were not launched by a `.gs2print` ticket and will never write one. The user starts the printer app and turns listening on. The window shows the address. Another emulator that can open a TCP connection, or a real Apple II whose serial adapter opens one, is pointed at that address.
 
-The bytes on the connection are the printer bytes, one direction, with no header. One connection is one job. Closing it ends the job. About 10 seconds with no bytes also ends it, because a serial-to-network adapter often holds its TCP connection open across what the Apple II thinks are separate jobs. The next bytes start another page.
+The bytes on the connection are the printer bytes, one direction, with no header. One connection is one job. Closing it ends the job. About 60 seconds with no bytes also ends it, because a serial-to-network adapter often holds its TCP connection open across what the Apple II thinks are separate jobs. The next bytes start another page.
 
 The port is stored in the app's settings and shown in the window. Port 9100 is the usual starting choice, because that is the ordinary "send raw bytes, then close" printer port. If it is already taken, the window says so and the user picks another. Nothing in GS2 or the sidecar assumes a compiled-in port for the ticket path above.
 
@@ -199,3 +199,27 @@ A GS2 ticket still works while the server is running. The app connects out to GS
 ### When the sidecar is not installed
 
 Opening the ticket fails, or nothing connects within a few seconds. GS2 shows an OSD toast saying the printer app is not installed, and keeps writing the raw capture file it already writes. The user can open that file in the sidecar later. Guest software is not stalled on the missing app.
+
+## Colour
+
+The ImageWriter II colour ribbon has four bands: yellow, magenta, cyan, and black. `ESC K n` selects a colour. `n` is an ASCII digit, `$30`–`$36`.
+
+| `n` | Colour | Planes |
+| --- | --- | --- |
+| `0` | Black | K |
+| `1` | Yellow | Y |
+| `2` | Magenta | M |
+| `3` | Cyan | C |
+| `4` | Orange | Y and M |
+| `5` | Green | Y and C |
+| `6` | Purple | M and C |
+
+The owner's manual names magenta "red" and cyan "blue". Those are the same two bands. Power-on colour is black. Combined colours print yellow first, then the other band, matching the Technical Reference Manual.
+
+A real printer activates these commands only when a colour ribbon is installed. The emulation always has one. Software can still overprint: a carriage return with no line feed, then another `ESC K`, paints the same dots in a second band.
+
+Each plane is a 720 dpi packed 1-bit bitmap, bit 7 leftmost, two grid units per pixel. Painting ORs into the selected plane or planes. A later hit on the same pixel keeps the earlier ink. The four bits are independent, so orange is Y and M set, not a fifth colour value.
+
+The page under the head keeps all four planes uncompressed. A form feed, or the end of the job, deflates each plane with a PNG Up row predictor. An unused plane compresses to almost nothing, so a black-only job stays cheap. The C API returns one plane at a time. The frontend composites the four planes for the preview.
+
+Each PDF page is four 1-bit images, one per plane, Flate-compressed with PNG predictor 12. They are PDF optional-content layers named Yellow, Magenta, Cyan, and Black, drawn in that order at 8.5 by 11 inches. Each image is ink-as-1, painted in that band's colour, and multiply-composited onto white paper so overlapping inks mix subtractively. The on-screen preview composites the same four planes; the frontend does not re-read the PDF to draw it.

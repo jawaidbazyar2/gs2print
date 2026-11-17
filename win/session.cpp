@@ -10,6 +10,7 @@
 #include <knownfolders.h>
 #include <shlobj.h>
 
+#include <array>
 #include <vector>
 
 namespace {
@@ -384,10 +385,13 @@ void Session::requestPreview() {
     int width = 0;
     int height = 0;
     int stride = 0;
-    const uint8_t *bits = gs2_job_page_bits(job, pageIndex, &width, &height, &stride);
-    if (!bits || width <= 0 || height <= 0 || stride <= 0) return;
-    std::vector<uint8_t> copy(bits, bits + static_cast<size_t>(height) * static_cast<size_t>(stride));
-    preview.submit(std::move(copy), width, height, stride, ++generation);
+    std::array<std::vector<uint8_t>, 4> copies;
+    for (int plane = 0; plane < 4; ++plane) {
+        const uint8_t *bits = gs2_job_page_bits(job, pageIndex, plane, &width, &height, &stride);
+        if (!bits || width <= 0 || height <= 0 || stride <= 0) return;
+        copies[plane].assign(bits, bits + static_cast<size_t>(height) * static_cast<size_t>(stride));
+    }
+    preview.submit(std::move(copies), width, height, stride, ++generation);
 }
 
 std::wstring Session::saveDocuments() {

@@ -12,6 +12,9 @@
 
 namespace {
 
+// Guest software can pause for a long time in the middle of one job.
+constexpr unsigned long long kJobIdleMs = 60000;
+
 std::wstring trim(std::wstring text) {
     while (!text.empty() && iswspace(text.front())) text.erase(text.begin());
     while (!text.empty() && iswspace(text.back())) text.pop_back();
@@ -289,7 +292,7 @@ void PrintServer::threadMain() {
             u_long one = 1;
             ioctlsocket(fd, FIONBIO, &one);
             loop.client = fd;
-            loop.idleAt = GetTickCount64() + 10000;
+            loop.idleAt = GetTickCount64() + kJobIdleMs;
             post(Ev{EvKind::Client, true, {}});
         }
     };
@@ -303,7 +306,7 @@ void PrintServer::threadMain() {
                 ev.kind = EvKind::Bytes;
                 ev.bytes.assign(loop.buf, loop.buf + n);
                 post(std::move(ev));
-                loop.idleAt = GetTickCount64() + 10000;
+                loop.idleAt = GetTickCount64() + kJobIdleMs;
                 continue;
             }
             if (n < 0 && WSAGetLastError() == WSAEINTR) continue;

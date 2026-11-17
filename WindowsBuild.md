@@ -198,13 +198,13 @@ A path that begins with `\\.\pipe\` or `\\?\pipe\` is opened with `CreateFileW` 
 
 The read is a blocking `recv` on a worker thread, 16 KB at a time. A readiness wait can miss the peer's close, and the job would then never write its PDF. `shutdown(SD_BOTH)` from the UI thread unblocks that `recv`. A pipe uses `ReadFile` and `CancelIoEx` the same way.
 
-Ten seconds with no bytes shuts the connection down. That is the same idle close as a capture file. The worker then reports the close, and the UI finishes the job. GS2 closing its end, or the user pressing Close Job, finishes it the same way. Zero bytes received produces no PDF.
+Sixty seconds with no bytes shuts the connection down. Guest software can pause that long in the middle of one job. The worker then reports the close, and the UI finishes the job. GS2 closing its end, or the user pressing Close Job, finishes it the same way. Zero bytes received produces no PDF.
 
 On the first byte, replace any previous core object, call `gs2_job_new` and `gs2_job_set_auto_lf`, and start the preview. Further bytes call `gs2_job_write` on the UI thread only.
 
 ## TCP server
 
-`server.cpp` is the raw printer port from `app/PrintServer.swift`. One accepted client at a time. A second connection is accepted and closed. Ten seconds of silence finishes the job in the window and leaves the socket open, so the next byte starts another job on that same connection. Closing the client, or Close Job, finishes the job and drops the client. The listener stays up until Listen is turned off.
+`server.cpp` is the raw printer port from `app/PrintServer.swift`. One accepted client at a time. A second connection is accepted and closed. Sixty seconds of silence finishes the job in the window and leaves the socket open, so the next byte starts another job on that same connection. Closing the client, or Close Job, finishes the job and drops the client. The listener stays up until Listen is turned off.
 
 Listen opens an IPv4 socket and an IPv6 socket. Both are nonblocking, `SO_REUSEADDR`, listen backlog 8. The IPv6 socket sets `IPV6_V6ONLY`. Localhost uses `127.0.0.1` and `in6addr_loopback`. Other computers uses `INADDR_ANY` and `in6addr_any`. If the IPv6 bind fails because the port is taken, close IPv4 and report the port in use. If IPv6 fails for any other reason, keep IPv4. One thread polls both listeners and the client with `WSAPoll`. The idle deadline is the poll timeout, reset on each received buffer.
 

@@ -27,10 +27,22 @@ struct Box {
     bool any = false;
 };
 
-Box bounds(gs2_job *job, int page) {
+void mergeBox(Box &into, const Box &b) {
+    if (!b.any) return;
+    if (!into.any) {
+        into = b;
+        return;
+    }
+    if (b.minX < into.minX) into.minX = b.minX;
+    if (b.maxX > into.maxX) into.maxX = b.maxX;
+    if (b.minY < into.minY) into.minY = b.minY;
+    if (b.maxY > into.maxY) into.maxY = b.maxY;
+}
+
+Box boundsPlane(gs2_job *job, int page, int plane) {
     Box box;
     int w = 0, h = 0, stride = 0;
-    const uint8_t *bits = gs2_job_page_bits(job, page, &w, &h, &stride);
+    const uint8_t *bits = gs2_job_page_bits(job, page, plane, &w, &h, &stride);
     if (!bits) return box;
     for (int y = 0; y < h; ++y) {
         const uint8_t *row = bits + static_cast<size_t>(y) * stride;
@@ -57,12 +69,25 @@ Box bounds(gs2_job *job, int page) {
     return box;
 }
 
-bool inkAt(gs2_job *job, int page, int x, int y) {
+Box bounds(gs2_job *job, int page) {
+    Box box;
+    for (int plane = 0; plane < 4; ++plane) mergeBox(box, boundsPlane(job, page, plane));
+    return box;
+}
+
+bool inkAtPlane(gs2_job *job, int page, int plane, int x, int y) {
     int w = 0, h = 0, stride = 0;
-    const uint8_t *bits = gs2_job_page_bits(job, page, &w, &h, &stride);
+    const uint8_t *bits = gs2_job_page_bits(job, page, plane, &w, &h, &stride);
     if (!bits || x < 0 || y < 0 || x >= w || y >= h) return false;
     const uint8_t *row = bits + static_cast<size_t>(y) * stride;
     return (row[x >> 3] & static_cast<uint8_t>(0x80 >> (x & 7))) != 0;
+}
+
+bool inkAt(gs2_job *job, int page, int x, int y) {
+    for (int plane = 0; plane < 4; ++plane) {
+        if (inkAtPlane(job, page, plane, x, y)) return true;
+    }
+    return false;
 }
 
 void writeStr(gs2_job *job, const char *s) {
@@ -200,6 +225,14 @@ void testFormFeedAndPdf() {
     expect(body.find("/FlateDecode") != std::string::npos && body.find("/Predictor 12") != std::string::npos
                && body.find("/CCITTFaxDecode") == std::string::npos,
            "pdf image is a 1-bit Flate picture with predictor 12");
+    expect(body.find("/OCG") != std::string::npos, "pdf has optional content groups");
+    expect(body.find("Yellow") != std::string::npos && body.find("Magenta") != std::string::npos
+               && body.find("Cyan") != std::string::npos && body.find("(Black)") != std::string::npos,
+           "pdf names the four ribbon layers");
+    expect(body.find("/Multiply") != std::string::npos, "pdf multiply-composites the planes");
+    int masks = 0;
+    for (size_t pos = 0; (pos = body.find("/ImageMask", pos)) != std::string::npos; ++pos) ++masks;
+    expect(masks == 8, "two pages times four image-mask planes");
     gs2_job_free(job);
 }
 
@@ -277,6 +310,63 @@ void testSplitCommands() {
     gs2_job_free(drop);
 }
 
+void testColour() {
+    uint8_t ybit[1] = {0x80};
+    uint8_t mbit[1] = {0x80};
+    uint8_t zbit[1] = {0};
+    const uint8_t *yellow[4] = {ybit, zbit, zbit, zbit};
+    uint8_t rgb[3] = {};
+    gs2_planes_composite(yellow, 1, 1, 1, rgb);
+    expect(rgb[0] == 255 && rgb[1] == 255 && rgb[2] == 0, "composite yellow 1x1");
+    const uint8_t *orange[4] = {ybit, mbit, zbit, zbit};
+    gs2_planes_composite(orange, 1, 1, 1, rgb);
+    expect(rgb[0] == 255 && rgb[1] == 0 && rgb[2] == 0, "composite orange 1x1");
+    const uint8_t *black[4] = {zbit, zbit, zbit, ybit};
+    gs2_planes_composite(black, 1, 1, 1, rgb);
+    expect(rgb[0] == 0 && rgb[1] == 0 && rgb[2] == 0, "composite black 1x1");
+
+    gs2_job *job = gs2_job_new();
+    writeStr(job, "A");
+    gs2_job_finish(job);
+    expect(boundsPlane(job, 0, 3).any, "default ink is black");
+    expect(!boundsPlane(job, 0, 0).any && !boundsPlane(job, 0, 1).any && !boundsPlane(job, 0, 2).any,
+           "default is not colour");
+    gs2_job_free(job);
+
+    job = gs2_job_new();
+    writeStr(job, "\x1bK1A");
+    gs2_job_finish(job);
+    expect(boundsPlane(job, 0, 0).any, "ESC K1 inks yellow");
+    expect(!boundsPlane(job, 0, 1).any, "ESC K1 not magenta");
+    expect(!boundsPlane(job, 0, 2).any, "ESC K1 not cyan");
+    expect(!boundsPlane(job, 0, 3).any, "ESC K1 not black");
+    gs2_job_free(job);
+
+    job = gs2_job_new();
+    writeStr(job, "\x1bK4A");
+    gs2_job_finish(job);
+    expect(boundsPlane(job, 0, 0).any && boundsPlane(job, 0, 1).any, "ESC K4 inks yellow and magenta");
+    expect(!boundsPlane(job, 0, 2).any && !boundsPlane(job, 0, 3).any, "ESC K4 not cyan or black");
+    gs2_job_free(job);
+
+    job = gs2_job_new();
+    writeStr(job, "\x1bK1A\r\x1bK2A");
+    gs2_job_finish(job);
+    Box y = boundsPlane(job, 0, 0);
+    Box m = boundsPlane(job, 0, 1);
+    expect(y.any && m.any && y.minX == m.minX && y.minY == m.minY,
+           "CR overprint shares yellow and magenta dots");
+    expect(!boundsPlane(job, 0, 3).any, "overprint is not black");
+    gs2_job_free(job);
+
+    job = gs2_job_new();
+    writeStr(job, "\x1bK1A\x1b" "cB");
+    gs2_job_finish(job);
+    expect(boundsPlane(job, 0, 0).any, "yellow A survives ESC c");
+    expect(boundsPlane(job, 0, 3).any, "ESC c returns to black");
+    gs2_job_free(job);
+}
+
 }  // namespace
 
 int main() {
@@ -289,6 +379,7 @@ int main() {
     testFormFeedAndPdf();
     testHeader();
     testSplitCommands();
+    testColour();
     if (g_failed) {
         std::printf("%d failed\n", g_failed);
         return 1;

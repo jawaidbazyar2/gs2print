@@ -1,6 +1,9 @@
 #include "preview.hpp"
 
+#include "gs2print.h"
+
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
@@ -13,50 +16,43 @@ constexpr double kMinLongSide = 80;
 constexpr double kMaxLongSide = 4000;
 
 struct Job {
-    std::vector<uint8_t> bits;
+    std::array<std::vector<uint8_t>, 4> planes;
     int width = 0;
     int height = 0;
     int stride = 0;
     uint64_t generation = 0;
 };
 
-HBITMAP expandGray(const uint8_t *bits, int width, int height, int stride) {
+HBITMAP expandRgb(const std::array<std::vector<uint8_t>, 4> &planes, int width, int height, int stride) {
     if (width <= 0 || height <= 0 || stride <= 0) return nullptr;
-    struct Info {
-        BITMAPINFOHEADER header;
-        RGBQUAD colors[256];
-    } info{};
-    info.header.biSize = sizeof(BITMAPINFOHEADER);
-    info.header.biWidth = width;
-    info.header.biHeight = -height;
-    info.header.biPlanes = 1;
-    info.header.biBitCount = 8;
-    info.header.biCompression = BI_RGB;
-    for (int i = 0; i < 256; ++i) {
-        info.colors[i].rgbRed = static_cast<BYTE>(i);
-        info.colors[i].rgbGreen = static_cast<BYTE>(i);
-        info.colors[i].rgbBlue = static_cast<BYTE>(i);
+    const size_t packed = static_cast<size_t>(height) * static_cast<size_t>(stride);
+    const uint8_t *ptrs[4] = {};
+    for (int p = 0; p < 4; ++p) {
+        if (planes[p].size() < packed) return nullptr;
+        ptrs[p] = planes[p].data();
     }
+    std::vector<uint8_t> rgb(static_cast<size_t>(width) * static_cast<size_t>(height) * 3);
+    gs2_planes_composite(ptrs, width, height, stride, rgb.data());
+
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
     void *pixels = nullptr;
-    HBITMAP dib = CreateDIBSection(nullptr, reinterpret_cast<BITMAPINFO *>(&info), DIB_RGB_COLORS, &pixels, nullptr, 0);
+    HBITMAP dib = CreateDIBSection(nullptr, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
     if (!dib || !pixels) return nullptr;
-    int rowBytes = (width + 3) & ~3;
     auto *out = static_cast<uint8_t *>(pixels);
-    std::memset(out, 255, static_cast<size_t>(rowBytes) * static_cast<size_t>(height));
-    int packed = (std::min)(stride, (width + 7) / 8);
     for (int y = 0; y < height; ++y) {
-        const uint8_t *src = bits + static_cast<size_t>(y) * static_cast<size_t>(stride);
-        uint8_t *dest = out + static_cast<size_t>(y) * static_cast<size_t>(rowBytes);
-        for (int byte = 0; byte < packed; ++byte) {
-            uint8_t value = src[byte];
-            if (!value) continue;
-            int x0 = byte * 8;
-            int n = (std::min)(8, width - x0);
-            uint8_t mask = 0x80;
-            for (int bit = 0; bit < n; ++bit) {
-                if (value & mask) dest[x0 + bit] = 0;
-                mask = static_cast<uint8_t>(mask >> 1);
-            }
+        const uint8_t *src = rgb.data() + static_cast<size_t>(y) * static_cast<size_t>(width) * 3;
+        uint8_t *dest = out + static_cast<size_t>(y) * static_cast<size_t>(width) * 4;
+        for (int x = 0; x < width; ++x) {
+            dest[x * 4 + 0] = src[x * 3 + 2];
+            dest[x * 4 + 1] = src[x * 3 + 1];
+            dest[x * 4 + 2] = src[x * 3 + 0];
+            dest[x * 4 + 3] = 255;
         }
     }
     return dib;
@@ -127,7 +123,7 @@ struct PagePreview::Worker {
                 current = std::move(job);
                 hasWork = false;
             }
-            HBITMAP bmp = expandGray(current.bits.data(), current.width, current.height, current.stride);
+            HBITMAP bmp = expandRgb(current.planes, current.width, current.height, current.stride);
             HWND target = nullptr;
             {
                 std::lock_guard lock(mu);
@@ -176,11 +172,12 @@ void PagePreview::clear() {
     ++shownGeneration;
 }
 
-void PagePreview::submit(std::vector<uint8_t> bits, int width, int height, int stride, uint64_t generation) {
+void PagePreview::submit(std::array<std::vector<uint8_t>, 4> planes, int width, int height, int stride,
+                         uint64_t generation) {
     if (!worker) return;
     shownGeneration = generation;
     Job job;
-    job.bits = std::move(bits);
+    job.planes = std::move(planes);
     job.width = width;
     job.height = height;
     job.stride = stride;

@@ -594,9 +594,14 @@ final class JobModel: ObservableObject {
         var width: Int32 = 0
         var height: Int32 = 0
         var stride: Int32 = 0
-        guard let bits = gs2_job_page_bits(job, Int32(pageIndex), &width, &height, &stride) else { return }
-        guard width > 0, height > 0, stride > 0 else { return }
-        let copied = Data(bytes: bits, count: Int(height) * Int(stride))
+        var planes: [Data] = []
+        planes.reserveCapacity(4)
+        for plane in 0..<4 {
+            guard let bits = gs2_job_page_bits(job, Int32(pageIndex), Int32(plane),
+                                               &width, &height, &stride) else { return }
+            guard width > 0, height > 0, stride > 0 else { return }
+            planes.append(Data(bytes: bits, count: Int(height) * Int(stride)))
+        }
         let w = Int(width)
         let h = Int(height)
         let s = Int(stride)
@@ -604,7 +609,7 @@ final class JobModel: ObservableObject {
         previewDirty = false
         previewInFlight = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let image = pageImage(copied, width: w, height: h, stride: s)
+            let image = pageImage(planes, width: w, height: h, stride: s)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.previewInFlight = false
@@ -650,29 +655,30 @@ final class JobModel: ObservableObject {
     }
 }
 
-/// Full 720 dpi page, one gray byte per printer pixel. The view scales this
+/// Full 720 dpi page, RGB from the four ribbon planes. The view scales this
 /// to the window. A baked 8× reduction was 90 dpi, and nearest-neighbor
 /// then drew those pixels as blocks on a retina display.
-private func pageImage(_ bits: Data, width: Int, height: Int, stride: Int) -> CGImage? {
-    guard width > 0, height > 0, bits.count >= height * stride else { return nil }
-    var pixels = [UInt8](repeating: 255, count: width * height)
-    bits.withUnsafeBytes { raw in
-        guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-        pixels.withUnsafeMutableBytes { dst in
-            guard let out = dst.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-            for y in 0..<height {
-                let row = base + y * stride
-                let dest = out + y * width
-                let bytes = min(stride, (width + 7) / 8)
-                for byte in 0..<bytes {
-                    let value = row[byte]
-                    if value == 0 { continue }
-                    let x0 = byte * 8
-                    let n = min(8, width - x0)
-                    var mask: UInt8 = 0x80
-                    for bit in 0..<n {
-                        if value & mask != 0 { dest[x0 + bit] = 0 }
-                        mask >>= 1
+private func pageImage(_ planes: [Data], width: Int, height: Int, stride: Int) -> CGImage? {
+    guard width > 0, height > 0, planes.count == 4 else { return nil }
+    let packed = height * stride
+    guard planes.allSatisfy({ $0.count >= packed }) else { return nil }
+    var pixels = [UInt8](repeating: 255, count: width * height * 3)
+    pixels.withUnsafeMutableBytes { destRaw in
+        guard let dest = destRaw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+        planes[0].withUnsafeBytes { yRaw in
+            planes[1].withUnsafeBytes { mRaw in
+                planes[2].withUnsafeBytes { cRaw in
+                    planes[3].withUnsafeBytes { kRaw in
+                        var ptrs: [UnsafePointer<UInt8>?] = [
+                            yRaw.bindMemory(to: UInt8.self).baseAddress,
+                            mRaw.bindMemory(to: UInt8.self).baseAddress,
+                            cRaw.bindMemory(to: UInt8.self).baseAddress,
+                            kRaw.bindMemory(to: UInt8.self).baseAddress,
+                        ]
+                        ptrs.withUnsafeBufferPointer { buf in
+                            gs2_planes_composite(buf.baseAddress, Int32(width), Int32(height),
+                                                 Int32(stride), dest)
+                        }
                     }
                 }
             }
@@ -684,10 +690,10 @@ private func pageImage(_ bits: Data, width: Int, height: Int, stride: Int) -> CG
         width: width,
         height: height,
         bitsPerComponent: 8,
-        bitsPerPixel: 8,
-        bytesPerRow: width,
-        space: CGColorSpaceCreateDeviceGray(),
-        bitmapInfo: CGBitmapInfo(rawValue: 0),
+        bitsPerPixel: 24,
+        bytesPerRow: width * 3,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
         provider: provider,
         decode: nil,
         shouldInterpolate: true,

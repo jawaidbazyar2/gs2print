@@ -1,6 +1,10 @@
 import Darwin
 import Foundation
 
+/// How long a live job may receive nothing before it is finished. Guest
+/// software can pause for a long time in the middle of one job.
+private let jobIdleSeconds: TimeInterval = 60
+
 /// Raw printer port. One client at a time; a second connection is accepted
 /// and closed. Silence ends a job in the app, and the socket stays open so
 /// the next byte can start another job.
@@ -186,7 +190,7 @@ private final class SocketLoop {
             self.events.push(.idle)
         }
         idleItem = item
-        queue.asyncAfter(deadline: .now() + 10, execute: item)
+        queue.asyncAfter(deadline: .now() + jobIdleSeconds, execute: item)
     }
 
     private enum BindError: Error {
@@ -660,7 +664,7 @@ final class TicketClient {
             self?.cutOff()
         }
         idleItem = item
-        idleQueue.asyncAfter(deadline: .now() + 10, execute: item)
+        idleQueue.asyncAfter(deadline: .now() + jobIdleSeconds, execute: item)
     }
 
     /// Wakes the blocking read. The read loop reports the close, which ends

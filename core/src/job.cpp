@@ -4,6 +4,7 @@
 
 #include "hpdf.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <setjmp.h>
@@ -31,9 +32,9 @@ struct gs2_job : Paper {
 
     gs2_job() : iw(this) {}
 
-    void ink(int x, int y, int w, int h) override {
-        open.fill(x + Page::kOriginX, y, w, h);
-        if (w > 0 && h > 0) dirty = true;
+    void ink(int x, int y, int w, int h, unsigned planes) override {
+        open.fill(x + Page::kOriginX, y, w, h, planes);
+        if (w > 0 && h > 0 && planes) dirty = true;
     }
 
     void formFeed() override {
@@ -76,16 +77,17 @@ int gs2_job_page_count(gs2_job *job) {
     return static_cast<int>(job->pages.size()) + (job->countOpen ? 1 : 0);
 }
 
-const uint8_t *gs2_job_page_bits(gs2_job *job, int page, int *width, int *height, int *stride) {
-    if (!job || page < 0) return nullptr;
+const uint8_t *gs2_job_page_bits(gs2_job *job, int page, int plane,
+                                 int *width, int *height, int *stride) {
+    if (!job || page < 0 || plane < 0 || plane >= Page::kPlanes) return nullptr;
     job->iw.sync();
     const Page *src = nullptr;
     if (page < static_cast<int>(job->pages.size())) src = &job->pages[page];
     else if (job->countOpen && page == static_cast<int>(job->pages.size())) src = &job->open;
     if (!src) return nullptr;
-    const uint8_t *bits = src->bits.data();
-    if (src->bits.empty()) {
-        if (!src->inflateInto(job->scratch)) return nullptr;
+    const uint8_t *bits = src->bits[plane].data();
+    if (src->bits[plane].empty()) {
+        if (!src->inflateInto(plane, job->scratch)) return nullptr;
         bits = job->scratch.data();
     }
     if (width) *width = Page::kWidth;
@@ -94,7 +96,60 @@ const uint8_t *gs2_job_page_bits(gs2_job *job, int page, int *width, int *height
     return bits;
 }
 
-static HPDF_Image loadFlateImage(HPDF_Doc pdf, const uint8_t *bits, int width, int height) {
+void gs2_planes_composite(const uint8_t *const planes[4],
+                          int width, int height, int stride,
+                          uint8_t *rgb) {
+    if (!planes || !rgb || width <= 0 || height <= 0 || stride <= 0) return;
+    const size_t pixels = static_cast<size_t>(width) * static_cast<size_t>(height);
+    std::memset(rgb, 255, pixels * 3);
+    static const uint8_t kInk[Page::kPlanes][3] = {
+        {255, 255, 0},
+        {255, 0, 255},
+        {0, 255, 255},
+        {0, 0, 0},
+    };
+    const int packed = std::min(stride, (width + 7) / 8);
+    for (int p = 0; p < Page::kPlanes; ++p) {
+        const uint8_t *src = planes[p];
+        if (!src) continue;
+        const uint8_t ir = kInk[p][0];
+        const uint8_t ig = kInk[p][1];
+        const uint8_t ib = kInk[p][2];
+        for (int y = 0; y < height; ++y) {
+            const uint8_t *row = src + static_cast<size_t>(y) * static_cast<size_t>(stride);
+            uint8_t *dest = rgb + static_cast<size_t>(y) * static_cast<size_t>(width) * 3;
+            for (int byte = 0; byte < packed; ++byte) {
+                uint8_t value = row[byte];
+                if (!value) continue;
+                int x0 = byte * 8;
+                int n = std::min(8, width - x0);
+                uint8_t mask = 0x80;
+                for (int bit = 0; bit < n; ++bit) {
+                    if (value & mask) {
+                        uint8_t *px = dest + (x0 + bit) * 3;
+                        px[0] = static_cast<uint8_t>(static_cast<unsigned>(px[0]) * ir / 255u);
+                        px[1] = static_cast<uint8_t>(static_cast<unsigned>(px[1]) * ig / 255u);
+                        px[2] = static_cast<uint8_t>(static_cast<unsigned>(px[2]) * ib / 255u);
+                    }
+                    mask = static_cast<uint8_t>(mask >> 1);
+                }
+            }
+        }
+    }
+}
+
+namespace {
+
+const char *kPlaneNames[Page::kPlanes] = {"Yellow", "Magenta", "Cyan", "Black"};
+const float kPlaneRgb[Page::kPlanes][3] = {
+    {1.0f, 1.0f, 0.0f},
+    {1.0f, 0.0f, 1.0f},
+    {0.0f, 1.0f, 1.0f},
+    {0.0f, 0.0f, 0.0f},
+};
+
+HPDF_Image loadFlateMask(HPDF_Doc pdf, const uint8_t *bits, int width, int height,
+                         HPDF_Dict ocg) {
     std::vector<uint8_t> filtered;
     Page::encodeUp(bits, filtered);
     if (filtered.size() > static_cast<size_t>(UINT32_MAX)) return nullptr;
@@ -106,18 +161,19 @@ static HPDF_Image loadFlateImage(HPDF_Doc pdf, const uint8_t *bits, int width, i
     HPDF_STATUS ret = HPDF_OK;
     ret += HPDF_Dict_AddName(image, "Type", "XObject");
     ret += HPDF_Dict_AddName(image, "Subtype", "Image");
-    ret += HPDF_Dict_AddName(image, "ColorSpace", "DeviceGray");
     if (ret != HPDF_OK) return nullptr;
     if (HPDF_Dict_AddNumber(image, "Width", width) != HPDF_OK) return nullptr;
     if (HPDF_Dict_AddNumber(image, "Height", height) != HPDF_OK) return nullptr;
     if (HPDF_Dict_AddNumber(image, "BitsPerComponent", 1) != HPDF_OK) return nullptr;
+    if (HPDF_Dict_AddBoolean(image, "ImageMask", HPDF_TRUE) != HPDF_OK) return nullptr;
 
-    // Ink bits are 1. DeviceGray paints 1 as white, so swap the samples.
+    // Ink bits are 1. ImageMask paints 0, so swap the samples.
     HPDF_Array decode = HPDF_Array_New(pdf->mmgr);
     if (!decode) return nullptr;
     if (HPDF_Array_AddNumber(decode, 1) != HPDF_OK) return nullptr;
     if (HPDF_Array_AddNumber(decode, 0) != HPDF_OK) return nullptr;
     if (HPDF_Dict_Add(image, "Decode", decode) != HPDF_OK) return nullptr;
+    if (ocg && HPDF_Dict_Add(image, "OC", ocg) != HPDF_OK) return nullptr;
 
     if (HPDF_Stream_Write(image->stream, filtered.data(),
                           static_cast<HPDF_UINT>(filtered.size())) != HPDF_OK)
@@ -133,6 +189,37 @@ static HPDF_Image loadFlateImage(HPDF_Doc pdf, const uint8_t *bits, int width, i
     return image;
 }
 
+bool addOcgs(HPDF_Doc pdf, HPDF_Dict ocgs[Page::kPlanes]) {
+    HPDF_Array list = HPDF_Array_New(pdf->mmgr);
+    HPDF_Array order = HPDF_Array_New(pdf->mmgr);
+    HPDF_Array on = HPDF_Array_New(pdf->mmgr);
+    if (!list || !order || !on) return false;
+    for (int p = 0; p < Page::kPlanes; ++p) {
+        HPDF_Dict ocg = HPDF_Dict_New(pdf->mmgr);
+        if (!ocg) return false;
+        if (HPDF_Xref_Add(pdf->xref, ocg) != HPDF_OK) return false;
+        if (HPDF_Dict_AddName(ocg, "Type", "OCG") != HPDF_OK) return false;
+        HPDF_String name = HPDF_String_New(pdf->mmgr, kPlaneNames[p], nullptr);
+        if (!name) return false;
+        if (HPDF_Dict_Add(ocg, "Name", name) != HPDF_OK) return false;
+        if (HPDF_Array_Add(list, ocg) != HPDF_OK) return false;
+        if (HPDF_Array_Add(order, ocg) != HPDF_OK) return false;
+        if (HPDF_Array_Add(on, ocg) != HPDF_OK) return false;
+        ocgs[p] = ocg;
+    }
+    HPDF_Dict d = HPDF_Dict_New(pdf->mmgr);
+    if (!d) return false;
+    if (HPDF_Dict_Add(d, "Order", order) != HPDF_OK) return false;
+    if (HPDF_Dict_Add(d, "ON", on) != HPDF_OK) return false;
+    HPDF_Dict props = HPDF_Dict_New(pdf->mmgr);
+    if (!props) return false;
+    if (HPDF_Dict_Add(props, "OCGs", list) != HPDF_OK) return false;
+    if (HPDF_Dict_Add(props, "D", d) != HPDF_OK) return false;
+    return HPDF_Dict_Add(pdf->catalog, "OCProperties", props) == HPDF_OK;
+}
+
+}  // namespace
+
 int gs2_job_save_pdf(gs2_job *job, const char *path) {
     if (!job || !path) return -1;
     int count = gs2_job_page_count(job);
@@ -147,26 +234,54 @@ int gs2_job_save_pdf(gs2_job *job, const char *path) {
 
     jump.doc = HPDF_New(gs2_pdf_error, &jump);
     if (!jump.doc) return -1;
+    if (jump.doc->pdf_version < HPDF_VER_15) jump.doc->pdf_version = HPDF_VER_15;
+
+    HPDF_Dict ocgs[Page::kPlanes] = {};
+    if (!addOcgs(jump.doc, ocgs)) {
+        HPDF_Free(jump.doc);
+        return -1;
+    }
+
+    HPDF_ExtGState multiply = HPDF_CreateExtGState(jump.doc);
+    if (!multiply) {
+        HPDF_Free(jump.doc);
+        return -1;
+    }
+    if (HPDF_ExtGState_SetBlendMode(multiply, HPDF_BM_MULTIPLY) != HPDF_OK) {
+        HPDF_Free(jump.doc);
+        return -1;
+    }
 
     const float pageW = 8.5f * 72.0f;
     const float pageH = 11.0f * 72.0f;
     for (int i = 0; i < count; ++i) {
-        int w = 0, h = 0, stride = 0;
-        const uint8_t *bits = gs2_job_page_bits(job, i, &w, &h, &stride);
-        if (!bits) {
-            HPDF_Free(jump.doc);
-            return -1;
-        }
         HPDF_Page page = HPDF_AddPage(jump.doc);
         HPDF_Page_SetWidth(page, pageW);
         HPDF_Page_SetHeight(page, pageH);
-        // Predictor rows go in uncompressed. libHaru deflates them on save.
-        HPDF_Image image = loadFlateImage(jump.doc, bits, w, h);
-        if (!image) {
+        if (HPDF_Page_SetExtGState(page, multiply) != HPDF_OK) {
             HPDF_Free(jump.doc);
             return -1;
         }
-        HPDF_Page_DrawImage(page, image, 0, 0, pageW, pageH);
+        for (int p = 0; p < Page::kPlanes; ++p) {
+            int w = 0, h = 0, stride = 0;
+            const uint8_t *bits = gs2_job_page_bits(job, i, p, &w, &h, &stride);
+            if (!bits) {
+                HPDF_Free(jump.doc);
+                return -1;
+            }
+            // Predictor rows go in uncompressed. libHaru deflates them on save.
+            HPDF_Image image = loadFlateMask(jump.doc, bits, w, h, ocgs[p]);
+            if (!image) {
+                HPDF_Free(jump.doc);
+                return -1;
+            }
+            if (HPDF_Page_SetRGBFill(page, kPlaneRgb[p][0], kPlaneRgb[p][1],
+                                     kPlaneRgb[p][2]) != HPDF_OK) {
+                HPDF_Free(jump.doc);
+                return -1;
+            }
+            HPDF_Page_DrawImage(page, image, 0, 0, pageW, pageH);
+        }
     }
 
     HPDF_STATUS saved = HPDF_SaveToFile(jump.doc, path);
