@@ -24,6 +24,16 @@ void gs2_job_set_auto_lf(gs2_job *job, int on);
  */
 void gs2_job_write(gs2_job *job, const uint8_t *bytes, size_t len);
 
+/* Copy printer-to-host bytes produced since the last call. Copies at
+ * most cap, returns how many, and leaves the rest. 0 if none.
+ */
+size_t gs2_job_take_reply(gs2_job *job, uint8_t *buf, size_t cap);
+
+/* 1 after any ink was painted, else 0. Stays 1 for the rest of the job.
+ * A form feed of a never-inked page does not count.
+ */
+int gs2_job_did_print(gs2_job *job);
+
 /* Commit the trailing page. An unfinished command is dropped. */
 void gs2_job_finish(gs2_job *job);
 

@@ -25,6 +25,7 @@ public:
 
     void start();
     void stop();
+    void send(const uint8_t *data, size_t len);
     std::vector<Event> take();
 
 private:

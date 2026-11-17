@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace {
 
@@ -66,6 +67,14 @@ void ImageWriter::setAutoLineFeed(bool on) {
     if (on) swA_ = static_cast<uint8_t>(swA_ | 0x80);
     else swA_ = static_cast<uint8_t>(swA_ & ~0x80);
     applySwitches();
+}
+
+size_t ImageWriter::takeReply(uint8_t *buf, size_t cap) {
+    if (!buf || cap == 0 || reply_.empty()) return 0;
+    size_t n = std::min(cap, reply_.size());
+    std::memcpy(buf, reply_.data(), n);
+    reply_.erase(reply_.begin(), reply_.begin() + static_cast<std::ptrdiff_t>(n));
+    return n;
 }
 
 void ImageWriter::byteIn(uint8_t raw) {
@@ -305,6 +314,11 @@ void ImageWriter::handleEsc(uint8_t ch) {
     case 'I':
         state_ = State::CustomKey;
         break;
+    case '?': {
+        static const uint8_t kId[] = {'I', 'W', '1', '0', 'C', '\r'};
+        reply_.insert(reply_.end(), kId, kId + sizeof kId);
+        break;
+    }
     case 'c':
         flushLine();
         pitch_ = 1;

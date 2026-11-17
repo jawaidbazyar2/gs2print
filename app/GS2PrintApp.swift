@@ -79,6 +79,9 @@ final class AppModel: ObservableObject {
         session.closeTCP = { [weak self] in
             self?.server.closeClient()
         }
+        session.sendTCP = { [weak self] data in
+            self?.server.send(data)
+        }
         server.onClient = { [weak self] connected in
             self?.tcpAttached(connected)
         }
@@ -209,6 +212,9 @@ final class AppModel: ObservableObject {
         session.closeTCP = { [weak self] in
             self?.server.closeClient()
         }
+        session.sendTCP = { [weak self] data in
+            self?.server.send(data)
+        }
         return session
     }
 
@@ -265,6 +271,7 @@ final class JobModel: ObservableObject {
     @Published fileprivate(set) var ownsTCP = false
 
     var closeTCP: (() -> Void)?
+    var sendTCP: ((Data) -> Void)?
     private(set) var ticket: TicketClient?
     private(set) var ticketPath: String?
 
@@ -363,6 +370,10 @@ final class JobModel: ObservableObject {
             message = url.lastPathComponent
             requestPreview()
 
+            guard gs2_job_did_print(created) != 0 else {
+                pdfURL = nil
+                return
+            }
             let pdf = Self.pdfURL(for: url)
             let ok = pdf.path.withCString { gs2_job_save_pdf(created, $0) }
             if ok == 0 {
@@ -434,7 +445,23 @@ final class JobModel: ObservableObject {
                 gs2_job_write(job, base, raw.count)
             }
         }
+        drainReply()
         noteInk()
+    }
+
+    private func drainReply() {
+        guard let job else { return }
+        var buf = [UInt8](repeating: 0, count: 32)
+        while true {
+            let n = gs2_job_take_reply(job, &buf, buf.count)
+            if n == 0 { break }
+            let payload = Data(buf[0..<Int(n)])
+            if let ticket {
+                ticket.send(payload)
+            } else {
+                sendTCP?(payload)
+            }
+        }
     }
 
     func finishNetworkJob() {
@@ -444,6 +471,14 @@ final class JobModel: ObservableObject {
         previewScheduled = false
         guard sawBytes, let job else { return }
         gs2_job_finish(job)
+        if gs2_job_did_print(job) == 0 {
+            pageCount = 0
+            image = nil
+            if pdfURL == nil {
+                message = "Open a printer dump."
+            }
+            return
+        }
         let count = Int(gs2_job_page_count(job))
         pageCount = count
         guard count > 0 else {

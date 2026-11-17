@@ -34,6 +34,7 @@ public:
     void setListening(bool on);
     void setAllowLAN(bool on);
     bool closeClient();
+    void send(const uint8_t *data, size_t len);
     void drain();
 
 private:
@@ -56,6 +57,7 @@ private:
     bool cmdLan = false;
     bool cmdDropped = false;
     bool cmdDone = false;
+    std::vector<uint8_t> outbound;
 
     std::mutex qmu;
     std::vector<Ev> queue;

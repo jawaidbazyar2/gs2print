@@ -28,7 +28,7 @@ win/session.cpp            one job: core handle, preview, PDF path
 win/window.cpp             the job window and its controls
 win/preview.cpp            1-bit page to an 8-bit DIB, then StretchBlt
 win/server.cpp             TCP listener
-win/ticket.cpp             connect to the ticket socket and read
+win/ticket.cpp             connect to the ticket socket, read guest bytes, write replies
 win/settings.cpp           registry
 win/associate.cpp          HKCU ProgID for .gs2print
 win/app.manifest
@@ -190,21 +190,21 @@ While a network job is open, preview updates are coalesced to 10 Hz. The window 
 
 ## Live ticket
 
-`ticket.cpp` connects and reads. It does not bind, listen, or delete the socket. GS2 owns the name.
+`ticket.cpp` connects, reads guest bytes, and writes printer replies. It does not bind, listen, or delete the socket. GS2 owns the name.
 
 The window shows `Connecting` and comes forward as soon as the file is accepted, before any printer bytes. On connect it shows `Printing`.
 
-A path that begins with `\\.\pipe\` or `\\?\pipe\` is opened with `CreateFileW` for generic read, existing only. Any other path is an `AF_UNIX` `SOCK_STREAM` socket. Call `WSAStartup` once at process start. Fill `sockaddr_un` with `sun_family = AF_UNIX` and copy the UTF-8 path, including the NUL, into `sun_path`. `sun_path` holds 108 bytes. A path that does not fit fails with `Socket path is too long.` The length passed to `connect` is the offset of `sun_path` plus the path bytes plus the NUL. Windows `sockaddr_un` has no `sun_len`.
+A path that begins with `\\.\pipe\` or `\\?\pipe\` is opened with `CreateFileW` for generic read and generic write, existing only. GS2's end of that pipe is duplex. Any other path is an `AF_UNIX` `SOCK_STREAM` socket, which is already full duplex. Call `WSAStartup` once at process start. Fill `sockaddr_un` with `sun_family = AF_UNIX` and copy the UTF-8 path, including the NUL, into `sun_path`. `sun_path` holds 108 bytes. A path that does not fit fails with `Socket path is too long.` The length passed to `connect` is the offset of `sun_path` plus the path bytes plus the NUL. Windows `sockaddr_un` has no `sun_len`.
 
-The read is a blocking `recv` on a worker thread, 16 KB at a time. A readiness wait can miss the peer's close, and the job would then never write its PDF. `shutdown(SD_BOTH)` from the UI thread unblocks that `recv`. A pipe uses `ReadFile` and `CancelIoEx` the same way.
+The read is a blocking `recv` on a worker thread, 16 KB at a time. A readiness wait can miss the peer's close, and the job would then never write its PDF. `shutdown(SD_BOTH)` from the UI thread unblocks that `recv`. A pipe uses `ReadFile` and `CancelIoEx` the same way. After each `gs2_job_write` on the UI thread, `gs2_job_take_reply` is drained and those bytes are written on the same connection (`send`, or `WriteFile` on a pipe) before the next guest buffer is fed.
 
-Sixty seconds with no bytes shuts the connection down. Guest software can pause that long in the middle of one job. The worker then reports the close, and the UI finishes the job. GS2 closing its end, or the user pressing Close Job, finishes it the same way. Zero bytes received produces no PDF.
+Sixty seconds with no bytes shuts the connection down. Guest software can pause that long in the middle of one job. The worker then reports the close, and the UI finishes the job. GS2 closing its end, or the user pressing Close Job, finishes it the same way. No ink produces no PDF. `ESC ?` alone, or that plus reset and page length, is not a print job.
 
-On the first byte, replace any previous core object, call `gs2_job_new` and `gs2_job_set_auto_lf`, and start the preview. Further bytes call `gs2_job_write` on the UI thread only.
+On the first byte, replace any previous core object, call `gs2_job_new` and `gs2_job_set_auto_lf`, and start the preview. Further bytes call `gs2_job_write` on the UI thread only. That first byte is often `ESC ?`. The reply is written before the next guest buffer is consumed, so the IW II driver can finish `_PrDevRead` while the page is still blank.
 
 ## TCP server
 
-`server.cpp` is the raw printer port from `app/PrintServer.swift`. One accepted client at a time. A second connection is accepted and closed. Sixty seconds of silence finishes the job in the window and leaves the socket open, so the next byte starts another job on that same connection. Closing the client, or Close Job, finishes the job and drops the client. The listener stays up until Listen is turned off.
+`server.cpp` is the raw printer port from `app/PrintServer.swift`. One accepted client at a time. A second connection is accepted and closed. Sixty seconds of silence finishes the job in the window and leaves the socket open, so the next byte starts another job on that same connection. Closing the client, or Close Job, finishes the job and drops the client. The listener stays up until Listen is turned off. The TCP connection is full duplex: after each `gs2_job_write`, drain `gs2_job_take_reply` and `send` those bytes to the client. A client that never reads is still accepted; the replies sit in the TCP window.
 
 Listen opens an IPv4 socket and an IPv6 socket. Both are nonblocking, `SO_REUSEADDR`, listen backlog 8. The IPv6 socket sets `IPV6_V6ONLY`. Localhost uses `127.0.0.1` and `in6addr_loopback`. Other computers uses `INADDR_ANY` and `in6addr_any`. If the IPv6 bind fails because the port is taken, close IPv4 and report the port in use. If IPv6 fails for any other reason, keep IPv4. One thread polls both listeners and the client with `WSAPoll`. The idle deadline is the poll timeout, reset on each received buffer.
 
@@ -216,7 +216,7 @@ A ticket still connects out while the server is listening. The core sees one byt
 
 ## PDF
 
-`gs2_job_finish`, then `gs2_job_save_pdf`. A live job, ticket or TCP, writes `GS2-Print-YYYYMMDD-HHMMSS.pdf` in Documents, using local time. If that name exists, append `-2`, then `-3`, and so on. The stamp uses the digits `yyyyMMdd-HHmmss`.
+`gs2_job_finish`, then `gs2_job_save_pdf` only if `gs2_job_did_print` is set. A live job, ticket or TCP, writes `GS2-Print-YYYYMMDD-HHMMSS.pdf` in Documents, using local time. If that name exists, append `-2`, then `-3`, and so on. The stamp uses the digits `yyyyMMdd-HHmmss`. A handshake that never inked writes no file.
 
 The link at the bottom of the window is the file name. Clicking it calls `ShellExecuteW` with the verb `open`. Failure sets `Could not open <name>.` The window stays on the finished page. The next bytes of a still-open TCP connection start a new job in that window. The next ticket is a new connection.
 

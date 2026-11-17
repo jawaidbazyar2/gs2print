@@ -8,6 +8,7 @@
 #include <iphlpapi.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <cwchar>
 
 namespace {
@@ -222,6 +223,15 @@ void PrintServer::applyNow() {
     }
 }
 
+void PrintServer::send(const uint8_t *data, size_t len) {
+    if (!data || len == 0) return;
+    {
+        std::lock_guard lock(mu);
+        outbound.insert(outbound.end(), data, data + len);
+    }
+    wake();
+}
+
 bool PrintServer::request(Cmd which) {
     {
         std::lock_guard lock(mu);
@@ -277,8 +287,39 @@ void PrintServer::threadMain() {
         closesocket(loop.client);
         loop.client = INVALID_SOCKET;
         loop.idleAt = 0;
+        {
+            std::lock_guard lock(mu);
+            outbound.clear();
+        }
         if (notify) post(Ev{EvKind::Closed, false, {}});
         return true;
+    };
+
+    auto flushOutbound = [&] {
+        if (loop.client == INVALID_SOCKET) return;
+        std::vector<uint8_t> pending;
+        {
+            std::lock_guard lock(mu);
+            pending.swap(outbound);
+        }
+        size_t sent = 0;
+        while (sent < pending.size()) {
+            int n = ::send(loop.client, reinterpret_cast<const char *>(pending.data() + sent),
+                           static_cast<int>(pending.size() - sent), 0);
+            if (n > 0) {
+                sent += static_cast<size_t>(n);
+                continue;
+            }
+            if (n < 0 && WSAGetLastError() == WSAEINTR) continue;
+            if (n < 0 && WSAGetLastError() == WSAEWOULDBLOCK) {
+                std::lock_guard lock(mu);
+                outbound.insert(outbound.begin(), pending.begin() + static_cast<std::ptrdiff_t>(sent),
+                                pending.end());
+                return;
+            }
+            dropClient(true);
+            return;
+        }
     };
 
     auto acceptOn = [&](SOCKET listener) {
@@ -386,6 +427,7 @@ void PrintServer::threadMain() {
             continue;
         }
 
+        flushOutbound();
         if (loop.client != INVALID_SOCKET && loop.idleAt != 0 && GetTickCount64() >= loop.idleAt) {
             loop.idleAt = 0;
             post(Ev{EvKind::Idle, false, {}});

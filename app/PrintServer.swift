@@ -63,6 +63,14 @@ private final class SocketLoop {
         }
     }
 
+    func send(_ data: Data) {
+        guard !data.isEmpty else { return }
+        queue.sync {
+            guard let client, client.alive else { return }
+            writeAll(client.fd, data)
+        }
+    }
+
     func startListening(port: UInt16, lan: Bool) -> Result {
         queue.sync {
             do {
@@ -97,6 +105,22 @@ private final class SocketLoop {
         guard let client else { return }
         retire(client)
         self.client = nil
+    }
+
+    private func writeAll(_ fd: Int32, _ data: Data) {
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            var sent = 0
+            while sent < raw.count {
+                let n = Darwin.send(fd, base.advanced(by: sent), raw.count - sent, 0)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    return
+                }
+                if n == 0 { return }
+                sent += n
+            }
+        }
     }
 
     /// The fd stays open until the cancel handler runs. That handler is a
@@ -443,6 +467,10 @@ final class PrintServer: ObservableObject {
         }
     }
 
+    func send(_ data: Data) {
+        loop.send(data)
+    }
+
     private func rebind() {
         guard ready else { return }
         let dropped = loop.stopListening()
@@ -555,6 +583,27 @@ final class TicketClient {
         idleItem?.cancel()
         if current >= 0 {
             shutdown(current, SHUT_RDWR)
+        }
+    }
+
+    func send(_ data: Data) {
+        guard !data.isEmpty else { return }
+        stateLock.lock()
+        let current = fd
+        stateLock.unlock()
+        guard current >= 0 else { return }
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            var sent = 0
+            while sent < raw.count {
+                let n = Darwin.send(current, base.advanced(by: sent), raw.count - sent, 0)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    return
+                }
+                if n == 0 { return }
+                sent += n
+            }
         }
     }
 

@@ -8,7 +8,7 @@ Research notes that led here: [Imagewriter.md](Imagewriter.md), [EpsonMX80.md](E
 
 GSSquared keeps capturing printer bytes the way it does now. It does not rasterize them. A separate printer app, which the user downloads on their own, turns a byte stream into a page on screen and a PDF.
 
-A port uses it when its `[[connections]]` device is `gs2print`. GS2 starts the app only when a print job actually begins. It writes a small `.gs2print` ticket and asks the operating system to open it. The ticket names a local socket that GS2 is already listening on. The printer app connects, its window appears immediately, and GS2 streams the guest's bytes as they arrive. Opened on its own, File → Open reads a raw printer dump and writes a PDF, with no emulator running.
+A port uses it when its `[[connections]]` device is `gs2print`. GS2 starts the app only when a print job actually begins. It writes a small `.gs2print` ticket and asks the operating system to open it. The ticket names a local socket that GS2 is already listening on. The printer app connects, its window appears immediately, and GS2 streams the guest's bytes as they arrive. Replies the printer owes the guest (`ESC ?` and anything later) travel the same socket back to GS2 and into serial RX. Opened on its own, File → Open reads a raw printer dump and writes a PDF, with no emulator running.
 
 The socket GS2 opens is a parent-chosen local name, not a fixed TCP port. macOS, Linux, and Windows all support that. The listen and connect calls live in a small platform library.
 
@@ -50,7 +50,36 @@ Draw every page as a bitmap. Embedded PDF fonts would make smaller, selectable t
 
 The print head has 9 pins at 1/72 inch. Paper moves in 1/144 inch steps, which is how double-density output works. Graphics mode uses the top 8 pins, one byte per column. Buffer a page or more, because the paper can move up and down, not only forward.
 
-Commands are ESC sequences: graphics, tabs, character set, colour (`ESC K n`), and the two software-switch banks (`ESC Z a b` opens switches, `ESC D a b` closes them). An ESC followed by an unknown byte is ignored along with that byte.
+Commands are ESC sequences: graphics, tabs, character set, colour (`ESC K n`), the two software-switch banks (`ESC Z a b` opens switches, `ESC D a b` closes them), and identification (`ESC ?`). An ESC followed by an unknown byte is ignored along with that byte.
+
+### Identification
+
+The GS/OS ImageWriter II driver (`NEW.IW/imager.aii`) opens with `ESC ?` (`$1B $3F`) and `_PrDevRead`s up to 8 bytes. A match is ASCII `IW10`, optionally preceded by one junk byte, then optional feature letters, then CR (`$0D`).
+
+| Letter | Meaning |
+| --- | --- |
+| `C` | colour ribbon |
+| `F` | sheet feeder |
+
+No match is not a failure. If the read returns zero bytes, the driver assumes ImageWriter I and continues. ImageWriter I never answered `ESC ?`. The timeout is the port driver's short DevRead, about 2 seconds on a v4+ driver. That is why a capture-only attachment neither hangs nor fails: the probe times out and printing proceeds as an ImageWriter I. Colour and sheet-feeder features then stay off.
+
+This emulation answers. The reply is `IW10C\r` (`$49 $57 $31 $30 $43 $0D`). `C` is always present because the colour ribbon is always installed. `F` is omitted; there is no sheet feeder. No leading junk byte. Six bytes fit the 8-byte read.
+
+`ESC ?` does not move the head, change switches, or ink. File → Open and saved dumps still consume it with no visible effect; there is no host to reply to.
+
+ImageWriter LQ is out of scope. Its driver sends `ESC Z $00 $02` then `ESC ?` and requires `LQ1`. Answering `IW10` does not satisfy that driver.
+
+After ID, the same IW II driver resets and sets page length. Those are ordinary commands, already in this spec, not a second protocol:
+
+```
+ESC c             hardware reset (head recal)
+ESC Z $07 $00     language / default switches
+ESC H nnnn        page length in 1/144" (1584 is 11 inches)
+```
+
+They are not page content. Dots start after them.
+
+Do not answer `ESC ?` inside GS2. The printer emulation is the printer. A loopback on the serial device would reply before the sidecar was up, and would then double-answer once it was.
 
 ### Fonts
 
@@ -74,7 +103,9 @@ One library turns printer bytes into pages. The platform frontends only display 
 
 Write it in C++. The printer is a stateful object: head position, switch banks, tabs, the custom character set, and the page under the head. That is the same language as GSSquared, and libHaru's C API calls from C++ directly.
 
-Export a small C API for the frontends. Swift and AppKit on macOS, a Win32 window on Windows, and GTK on Linux can all call C. They should not depend on the C++ ABI. The C functions are: feed bytes, read the current page planes (pointer, width, height, stride, one plane at a time), and finish the job.
+Export a small C API for the frontends. Swift and AppKit on macOS, a Win32 window on Windows, and GTK on Linux can all call C. They should not depend on the C++ ABI. The C functions are: feed bytes, take any printer-to-host reply those bytes produced, ask whether the job painted ink, read the current page planes (pointer, width, height, stride, one plane at a time), and finish the job.
+
+`gs2_job_write` never waits. A command split across calls stays in the decoder until a later write completes it. `ESC ?` split across two writes emits the reply on the write that supplies `?`. After each write on a live or TCP session, the frontend copies pending reply bytes with `gs2_job_take_reply(job, buf, cap)` and writes them on the same connection, toward the guest. The call copies at most `cap` bytes, returns how many, and leaves the rest. File → Open does not take replies. `gs2_job_did_print` is 1 after any ink, else 0. A live session writes a PDF only when that is set.
 
 The head is placed at 1440 dpi. That grid divides the wire pitch (1/72 inch), the paper step (1/144 inch), and the graphics densities 72, 80, 96, 120, 144, and 160. The stored page is 720 dpi, four packed 1-bit planes, one per ribbon band: each dot rectangle is rounded onto that grid when it is drawn, two grid units per pixel. The page under the head is uncompressed, so dots can be painted as bytes arrive. A form feed, or the end of the job, commits that page. The core deflates each plane with a PNG Up row predictor and starts a fresh uncompressed page. Reading a committed page inflates it. The frontend redraws from the planes as bytes arrive, so the preview is the page in progress.
 
@@ -120,15 +151,15 @@ The sidecar registers itself as the handler for `.gs2print` when the user instal
 
 ### When a job starts
 
-Nothing is launched at emulator startup. The first byte after the port has been idle starts the job, which is the same moment `FileDevice` opens a capture file.
+Nothing is launched at emulator startup. The first byte after the port has been idle starts the job, which is the same moment `FileDevice` opens a capture file. For the ImageWriter II driver that byte is often `ESC ?`, during "Establishing communication", not page data. The ticket still starts then: the sidecar has to be on the socket to answer before DevRead expires. The window may appear on a blank page. That is the handshake, not a defect.
 
 1. GS2 picks a fresh local socket name, binds, and listens.
 2. GS2 writes a ticket (below) in the temp directory.
 3. GS2 asks the operating system to open that file (`open` on macOS, `ShellExecute` on Windows, `xdg-open` on Linux).
 4. The association starts the printer app, or delivers the file to one that is already running. The app reads the ticket and connects.
-5. GS2 accepts and writes the guest bytes as they arrive. The window is up before any dots are drawn.
+5. GS2 accepts, writes any guest bytes it held, then writes further bytes as they arrive. The window is up before any dots are drawn. Replies the sidecar writes are read by GS2 and placed in the serial port's RX path.
 
-GS2 listens, and the sidecar connects. The operating system starts the app, so GS2 has no pipe to it and cannot wait on its stdout. Binding before the open means the sidecar finds a listener when it starts.
+GS2 listens, and the sidecar connects. The operating system starts the app, so GS2 has no pipe to it and cannot wait on its stdout. Binding before the open means the sidecar finds a listener when it starts. Guest TX that arrives before accept is held in order and flushed on accept, so a cold start that connects inside the DevRead window still replies. If nothing connects in time, the driver falls through to ImageWriter I, the same as a missing reply on hardware. A second job against an already-running sidecar is fast.
 
 Each job gets its own socket name, so two emulators, or two jobs in a row, do not share an endpoint. A second `.gs2print` opened while a window is already up is another job: macOS delivers it to the running app, and Windows and Linux normally start another process. Either way, one connection is one job.
 
@@ -143,7 +174,11 @@ The same idea works on macOS, Linux, and Windows. A platform library exposes lis
 
 The path must fit in `sun_path`. Both ends must see the same path. Under MSYS2 that is a Windows path, because a `/tmp/...` path is translated by only one of the two processes.
 
-The byte stream on the socket is the guest's printer bytes, one direction, GS2 to the sidecar. The ticket already carries the printer model, so the socket has no header. Closing the connection ends the job.
+The socket is full duplex. Guest printer bytes travel GS2 to the sidecar. Printer-to-host bytes travel sidecar to GS2. The ticket already carries the printer model, so the socket has no header. Closing the connection ends the job.
+
+GS2 copies sidecar-to-GS2 bytes into the serial receive path the guest already uses (`_PrDevRead`, Super Serial Card RX, IIgs SCC channel A RX). It does not wait for a full reply; each `read` that returns data is injected as it arrives. A parallel card is output-only. Replies are still produced on that attachment and are discarded; they never reach the guest.
+
+The sidecar writes a reply as soon as `gs2_job_write` completes the command that produced it, without waiting for more guest bytes. `ESC ?` is two bytes and the reply is six. That has to land in the guest before the port driver's DevRead expires.
 
 ### `.gs2print` file
 
@@ -171,7 +206,7 @@ printer imagewriter-ii
 
 ### File → Open
 
-File → Open takes a raw printer dump, the headerless byte stream a `file` capture writes (`GS2.PARLn.*` or any other file of printer bytes). The frontend feeds the whole file to the core, shows the pages, and the core writes the PDF beside the dump, with the same basename and a `.pdf` extension. That file name is the link at the bottom of the window. A `.gs2print` saved dump (header, then bytes) opens the same way. No socket and no emulator are involved.
+File → Open takes a raw printer dump, the headerless byte stream a `file` capture writes (`GS2.PARLn.*` or any other file of printer bytes). The frontend feeds the whole file to the core, shows the pages, and the core writes the PDF beside the dump, with the same basename and a `.pdf` extension, only if the dump painted ink. A probe-only dump (`ESC ?`, or that plus reset and page length) opens with no PDF. A `.gs2print` saved dump (header, then bytes) opens the same way. No socket and no emulator are involved.
 
 ### When the job ends
 
@@ -182,23 +217,27 @@ The job ends when any of these happen:
 - The user presses the sidecar's close-job button, which closes its end of the socket.
 - GS2 closes its end.
 
-The sidecar finishes the page, the core saves the libHaru document to `GS2-Print-YYYYMMDD-HHMMSS.pdf` somewhere the user can find it (Documents is the default), and the window stays open on the finished page. The saved file name is the link at the bottom of the window. The next guest byte starts a new ticket and a new connection.
+If the job painted ink, the sidecar finishes the page and the core saves the libHaru document to `GS2-Print-YYYYMMDD-HHMMSS.pdf` somewhere the user can find it (Documents is the default). The window stays open on the finished page. The saved file name is the link at the bottom of the window. The next guest byte starts a new ticket and a new connection.
+
+A handshake that never inked (`ESC ?`, or that plus `ESC c` / `ESC Z` / `ESC H`) is not a print job. The sidecar still answers `ESC ?`. It does not write a PDF. The window returns to the idle prompt.
 
 ### Server mode
 
 Server mode is for clients that were not launched by a `.gs2print` ticket and will never write one. The user starts the printer app and turns listening on. The window shows the address. Another emulator that can open a TCP connection, or a real Apple II whose serial adapter opens one, is pointed at that address.
 
-The bytes on the connection are the printer bytes, one direction, with no header. One connection is one job. Closing it ends the job. About 60 seconds with no bytes also ends it, because a serial-to-network adapter often holds its TCP connection open across what the Apple II thinks are separate jobs. The next bytes start another page.
+The bytes on the connection are the printer bytes, full duplex, with no header. Guest TX is what the client writes. Printer replies are what this app writes back on the same connection. One connection is one job. Closing it ends the job. About 60 seconds with no bytes also ends it, because a serial-to-network adapter often holds its TCP connection open across what the Apple II thinks are separate jobs. The next bytes start another page.
+
+A client that only sends and never reads still works. The replies sit in the TCP window until the client reads or closes. Software that sends `ESC ?` and reads the serial data path gets `IW10C\r`.
 
 The port is stored in the app's settings and shown in the window. Port 9100 is the usual starting choice, because that is the ordinary "send raw bytes, then close" printer port. If it is already taken, the window says so and the user picks another. Nothing in GS2 or the sidecar assumes a compiled-in port for the ticket path above.
 
-Listening is on localhost until the user opts in to the LAN. A real machine on the network is the reason to opt in. The adapter copies UART bytes onto the TCP connection and handles baud rate and the printer's busy line on the Apple II side. Software that only sends bytes works. Software that bit-bangs the printer's status lines, instead of the serial bridge, has no real ImageWriter answering those lines.
+Listening is on localhost until the user opts in to the LAN. A real machine on the network is the reason to opt in. The adapter copies UART bytes onto the TCP connection and handles baud rate and the printer's busy line on the Apple II side. The adapter must also copy bytes the TCP server writes back onto the Apple II's serial RX. An adapter that is TX-only makes `ESC ?` time out, and the IW II driver then continues as ImageWriter I.
 
 A GS2 ticket still works while the server is running. The app connects out to GS2's local socket for that job, and accepts inbound TCP for the others. The renderer sees one byte stream either way.
 
 ### When the sidecar is not installed
 
-Opening the ticket fails, or nothing connects within a few seconds. GS2 shows an OSD toast saying the printer app is not installed, and keeps writing the raw capture file it already writes. The user can open that file in the sidecar later. Guest software is not stalled on the missing app.
+Opening the ticket fails, or nothing connects within a few seconds. GS2 shows an OSD toast saying the printer app is not installed, and keeps writing the raw capture file it already writes. The user can open that file in the sidecar later. Guest software is not stalled on the missing app. `ESC ?` times out, and the IW II driver continues as ImageWriter I.
 
 ## Colour
 

@@ -367,6 +367,66 @@ void testColour() {
     gs2_job_free(job);
 }
 
+void testIdentify() {
+    const uint8_t want[] = {'I', 'W', '1', '0', 'C', '\r'};
+    uint8_t got[16];
+
+    gs2_job *job = gs2_job_new();
+    expect(gs2_job_did_print(job) == 0, "new job has not printed");
+    writeStr(job, "\x1b?");
+    size_t n = gs2_job_take_reply(job, got, sizeof got);
+    expect(n == sizeof want && std::memcmp(got, want, sizeof want) == 0, "ESC ? replies IW10C CR");
+    expect(gs2_job_take_reply(job, got, sizeof got) == 0, "reply drains");
+    expect(!bounds(job, 0).any, "ESC ? does not ink");
+    expect(gs2_job_did_print(job) == 0, "ESC ? has not printed");
+    gs2_job_finish(job);
+    expect(gs2_job_did_print(job) == 0, "finished probe has not printed");
+    gs2_job_free(job);
+
+    job = gs2_job_new();
+    writeStr(job, "\x1b");
+    expect(gs2_job_take_reply(job, got, sizeof got) == 0, "split ESC has no reply yet");
+    writeStr(job, "?");
+    n = gs2_job_take_reply(job, got, sizeof got);
+    expect(n == sizeof want && std::memcmp(got, want, sizeof want) == 0, "split ESC ? replies on ?");
+    gs2_job_free(job);
+
+    job = gs2_job_new();
+    writeStr(job, "\x1b?\x1b?");
+    n = gs2_job_take_reply(job, got, 4);
+    expect(n == 4 && std::memcmp(got, want, 4) == 0, "short cap copies a prefix");
+    n = gs2_job_take_reply(job, got, sizeof got);
+    expect(n == 8 && std::memcmp(got, want + 4, 2) == 0 && std::memcmp(got + 2, want, 6) == 0,
+           "remainder then the second reply");
+    gs2_job_free(job);
+
+    job = gs2_job_new();
+    writeStr(job, "A");
+    expect(gs2_job_take_reply(job, got, sizeof got) == 0, "text yields no reply");
+    gs2_job_finish(job);
+    expect(gs2_job_did_print(job) == 1, "a printed character sets did_print");
+    gs2_job_free(job);
+
+    job = gs2_job_new();
+    writeStr(job, "\x1b?");
+    writeStr(job, "A");
+    gs2_job_finish(job);
+    expect(gs2_job_did_print(job) == 1, "ink after the probe sets did_print");
+    gs2_job_free(job);
+
+    job = gs2_job_new();
+    const uint8_t setup[] = {0x1B, 'c', 0x1B, 'Z', 0x07, 0x00, 0x1B, 'H', '1', '5', '8', '4'};
+    gs2_job_write(job, setup, sizeof setup);
+    expect(gs2_job_did_print(job) == 0, "reset and page length do not print");
+    expect(gs2_job_take_reply(job, got, sizeof got) == 0, "reset yields no reply");
+    gs2_job_free(job);
+
+    job = gs2_job_new();
+    writeStr(job, "\x0c");
+    expect(gs2_job_did_print(job) == 0, "form feed of a blank page does not print");
+    gs2_job_free(job);
+}
+
 }  // namespace
 
 int main() {
@@ -380,6 +440,7 @@ int main() {
     testHeader();
     testSplitCommands();
     testColour();
+    testIdentify();
     if (g_failed) {
         std::printf("%d failed\n", g_failed);
         return 1;

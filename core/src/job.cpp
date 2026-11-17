@@ -27,6 +27,7 @@ struct gs2_job : Paper {
     std::vector<Page> pages;
     std::vector<uint8_t> scratch;
     bool dirty = false;
+    bool printed = false;
     bool countOpen = true;
     ImageWriter iw;
 
@@ -34,7 +35,10 @@ struct gs2_job : Paper {
 
     void ink(int x, int y, int w, int h, unsigned planes) override {
         open.fill(x + Page::kOriginX, y, w, h, planes);
-        if (w > 0 && h > 0 && planes) dirty = true;
+        if (w > 0 && h > 0 && planes) {
+            dirty = true;
+            printed = true;
+        }
     }
 
     void formFeed() override {
@@ -58,6 +62,16 @@ void gs2_job_write(gs2_job *job, const uint8_t *bytes, size_t len) {
     if (!job) return;
     job->countOpen = true;
     job->iw.write(bytes, len);
+}
+
+size_t gs2_job_take_reply(gs2_job *job, uint8_t *buf, size_t cap) {
+    if (!job) return 0;
+    return job->iw.takeReply(buf, cap);
+}
+
+int gs2_job_did_print(gs2_job *job) {
+    if (!job) return 0;
+    return job->printed ? 1 : 0;
 }
 
 void gs2_job_finish(gs2_job *job) {

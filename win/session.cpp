@@ -184,6 +184,13 @@ void Session::openDump(const std::wstring &path) {
     networkJobOpen = false;
     requestPreview();
 
+    if (!gs2_job_did_print(job)) {
+        pdfPath.clear();
+        error.clear();
+        syncWindow(this);
+        return;
+    }
+
     std::wstring pdf = pdfBeside(path);
     std::string utf8 = narrow(pdf);
     if (gs2_job_save_pdf(job, utf8.c_str()) == 0) {
@@ -218,6 +225,13 @@ void Session::receive(const uint8_t *data, size_t len) {
     if (!networkJobOpen || !job) return;
     sawBytes = true;
     gs2_job_write(job, data, len);
+    uint8_t reply[32];
+    for (;;) {
+        size_t n = gs2_job_take_reply(job, reply, sizeof reply);
+        if (n == 0) break;
+        if (ticket) ticket->send(reply, n);
+        else if (ownsTCP) app().server.send(reply, n);
+    }
     noteInk();
 }
 
@@ -232,6 +246,13 @@ void Session::finishNetworkJob() {
         return;
     }
     gs2_job_finish(job);
+    if (!gs2_job_did_print(job)) {
+        pageCount = 0;
+        preview.clear();
+        if (pdfPath.empty()) message = L"Open a printer dump.";
+        syncWindow(this);
+        return;
+    }
     int count = gs2_job_page_count(job);
     pageCount = count;
     if (count <= 0) {

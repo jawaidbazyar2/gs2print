@@ -29,6 +29,9 @@ public:
     void sync();
     // Power-on SW1-8. Closed adds a line feed after CR.
     void setAutoLineFeed(bool on);
+    // Printer-to-host bytes produced since the last take. Copies at most
+    // cap and leaves the rest.
+    size_t takeReply(uint8_t *buf, size_t cap);
 
     int lineHeight() const { return lineHeight_; }
     bool pendingFeed() const { return pendingCR_; }
@@ -166,6 +169,7 @@ private:
     std::unordered_map<uint8_t, CustomChar> custom_;
 
     std::vector<Rect> line_;
+    std::vector<uint8_t> reply_;
 };
 
 #endif

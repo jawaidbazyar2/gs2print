@@ -27,6 +27,42 @@ void TicketClient::start() {
     idle = std::thread([this] { idleMain(); });
 }
 
+void TicketClient::send(const uint8_t *data, size_t len) {
+    if (!data || len == 0) return;
+    SOCKET sockCopy = INVALID_SOCKET;
+    HANDLE pipeCopy = INVALID_HANDLE_VALUE;
+    {
+        std::lock_guard lock(mu);
+        sockCopy = sock;
+        pipeCopy = pipe;
+    }
+    if (sockCopy != INVALID_SOCKET) {
+        const char *p = reinterpret_cast<const char *>(data);
+        size_t sent = 0;
+        while (sent < len) {
+            int n = ::send(sockCopy, p + sent, static_cast<int>(len - sent), 0);
+            if (n == SOCKET_ERROR) {
+                if (WSAGetLastError() == WSAEINTR) continue;
+                return;
+            }
+            if (n == 0) return;
+            sent += static_cast<size_t>(n);
+        }
+        return;
+    }
+    if (pipeCopy != INVALID_HANDLE_VALUE) {
+        const char *p = reinterpret_cast<const char *>(data);
+        size_t sent = 0;
+        while (sent < len) {
+            DWORD n = 0;
+            if (!WriteFile(pipeCopy, p + sent, static_cast<DWORD>(len - sent), &n, nullptr) || n == 0) {
+                return;
+            }
+            sent += n;
+        }
+    }
+}
+
 void TicketClient::stop() {
     stopRequested = true;
     idleDeadline = 0;
@@ -99,8 +135,9 @@ void TicketClient::idleMain() {
 void TicketClient::readerMain() {
     bool pipePath = path.rfind("\\\\.\\pipe\\", 0) == 0 || path.rfind("\\\\?\\pipe\\", 0) == 0;
     if (pipePath) {
-        HANDLE handle = CreateFileW(widen(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                     nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        HANDLE handle = CreateFileW(widen(path).c_str(), GENERIC_READ | GENERIC_WRITE,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                                     FILE_ATTRIBUTE_NORMAL, nullptr);
         if (handle == INVALID_HANDLE_VALUE) {
             Event failed;
             failed.kind = Kind::Failed;
