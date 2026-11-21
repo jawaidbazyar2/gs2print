@@ -1,6 +1,6 @@
 # gs2print
 
-macOS and Windows app that acts as a virtual ImageWriter II printer, including acting as a print server on a network.
+macOS and Windows app that acts as a virtual Color ImageWriter II printer, including acting as a print server on a network.
 
 It converts ImageWriter print data into a page preview and a PDF.
 
